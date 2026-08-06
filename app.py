@@ -16,7 +16,9 @@ from __future__ import annotations
 import hmac
 import io
 import re
+import traceback
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -42,6 +44,7 @@ APP_SUB = "Monitoring aktivitas olahraga karyawan TPB & GTN"
 
 WITA = timezone(timedelta(hours=8))
 
+# Warna cerah — HANYA untuk isian grafik, latar, dan aksen (bukan teks)
 INDIGO = "#5B5BD6"
 VIOLET = "#8B5CF6"
 CYAN = "#06B6D4"
@@ -49,9 +52,24 @@ EMERALD = "#10B981"
 AMBER = "#F59E0B"
 ROSE = "#F43F5E"
 PINK = "#EC4899"
-INK = "#181B2E"
-MUTED = "#7A82A6"
-GRID = "#E8EAF6"
+
+# Varian gelap — dipakai kalau warna tersebut jadi TEKS di atas latar terang.
+# Versi cerahnya punya kontras < 3:1 pada latar putih sehingga tidak terbaca.
+INDIGO_T = "#4338CA"
+VIOLET_T = "#6D28D9"
+CYAN_T = "#0E7490"
+EMERALD_T = "#047857"
+AMBER_T = "#B45309"
+ROSE_T = "#BE123C"
+
+TEKS_AKSEN = {
+    INDIGO: INDIGO_T, VIOLET: VIOLET_T, CYAN: CYAN_T,
+    EMERALD: EMERALD_T, AMBER: AMBER_T, ROSE: ROSE_T,
+}
+
+INK = "#181B2E"        # teks utama  — kontras ~14:1 di latar putih
+MUTED = "#5A6288"      # teks sekunder — kontras ~6.4:1 (sebelumnya #7A82A6 ≈ 4:1)
+GRID = "#E3E6F4"
 
 PALETTE = [INDIGO, CYAN, EMERALD, AMBER, PINK, VIOLET, "#14B8A6", "#F97316"]
 
@@ -92,89 +110,125 @@ CSS = """
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
+  /* Kunci skema terang. Tanpa ini, browser/OS dalam mode gelap membuat Streamlit
+     memakai teks putih di atas latar terang buatan kita -> tidak terbaca. */
+  :root, .stApp { color-scheme: light !important; }
+
   html, body, [class*="css"], .stApp { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-  .stApp { background: #F5F6FC; }
-  .block-container { padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1480px; }
-  #MainMenu, footer, header { visibility: hidden; }
+  .stApp { background: #F5F6FC; color: #181B2E; }
+  .block-container { padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1480px; }
+
+  /* Sidebar dimatikan; header dibiarkan agar menu Settings tetap bisa dibuka. */
   section[data-testid="stSidebar"], div[data-testid="collapsedControl"] { display: none !important; }
+  [data-testid="stAppDeployButton"], footer { display: none !important; }
+  header[data-testid="stHeader"] { background: transparent; }
+
+  /* ---------- paksa warna teks bawaan Streamlit ---------- */
+  .stApp p, .stApp li, .stApp label, .stApp .stMarkdown,
+  [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
+  [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p,
+  [data-testid="stExpander"] summary, [data-testid="stExpander"] p,
+  .stSelectbox label, .stTextInput label, .stNumberInput label, .stSlider label {
+      color: #181B2E !important;
+  }
+  [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p,
+  .stApp small { color: #5A6288 !important; }
+  [data-testid="stMetricValue"] { font-size: 1.32rem; font-weight: 800; color: #181B2E !important; }
+  [data-testid="stMetricDelta"] { color: #047857 !important; }
+
+  /* input & dropdown */
+  .stSelectbox div[data-baseweb="select"] > div, .stTextInput input,
+  .stNumberInput input { background: #fff !important; color: #181B2E !important;
+      border-color: #DDE1F2 !important; }
+  .stTextInput input::placeholder { color: #8A91B4 !important; }
+  div[data-baseweb="popover"] li { color: #181B2E !important; }
+
+  /* pills & segmented control */
+  div[data-testid="stPills"] button, div[data-testid="stSegmentedControl"] button {
+      color: #3B4168 !important; background: #fff !important; border-color: #DDE1F2 !important;
+      font-weight: 600; }
+  div[data-testid="stPills"] button[aria-checked="true"],
+  div[data-testid="stSegmentedControl"] button[aria-checked="true"] {
+      background: #4F46E5 !important; color: #fff !important; border-color: #4F46E5 !important; }
 
   /* ---------- hero ---------- */
-  .hero { background: linear-gradient(115deg,#4F46E5 0%,#7C3AED 42%,#DB2777 100%);
-          border-radius: 20px; padding: 1.5rem 1.8rem; color: #fff; position: relative;
-          overflow: hidden; box-shadow: 0 14px 34px -14px rgba(79,70,229,.55); }
+  .hero { background: linear-gradient(115deg,#4338CA 0%,#6D28D9 45%,#BE185D 100%);
+          border-radius: 20px; padding: 1.5rem 1.8rem; position: relative;
+          overflow: hidden; box-shadow: 0 14px 34px -14px rgba(67,56,202,.5); }
   .hero::after { content:""; position:absolute; right:-70px; top:-90px; width:290px; height:290px;
-                 border-radius:50%; background:rgba(255,255,255,.11); }
+                 border-radius:50%; background:rgba(255,255,255,.10); }
   .hero::before { content:""; position:absolute; right:80px; bottom:-120px; width:210px; height:210px;
-                  border-radius:50%; background:rgba(255,255,255,.08); }
-  .hero h1 { font-size:1.72rem; font-weight:800; margin:0 0 .3rem 0; letter-spacing:-.03em;
-             line-height:1.12; position:relative; z-index:1; }
-  .hero p { margin:0; font-size:.9rem; color:rgba(255,255,255,.86); position:relative; z-index:1; }
+                  background:rgba(255,255,255,.07); border-radius:50%; }
+  .hero h1, .hero p, .hero .tag { color:#fff !important; position:relative; z-index:1; }
+  .hero h1 { font-size:1.7rem; font-weight:800; margin:0 0 .3rem 0; letter-spacing:-.03em;
+             line-height:1.14; }
+  .hero p { margin:0; font-size:.9rem; opacity:.93; }
   .hero .tags { margin-top:.85rem; display:flex; gap:.45rem; flex-wrap:wrap;
                 position:relative; z-index:1; }
-  .hero .tag { background:rgba(255,255,255,.19); border:1px solid rgba(255,255,255,.26);
-               padding:.24rem .68rem; border-radius:999px; font-size:.74rem; font-weight:600;
-               backdrop-filter: blur(6px); }
-  .hero .track { margin-top:1rem; height:7px; background:rgba(255,255,255,.22);
+  .hero .tag { background:rgba(255,255,255,.2); border:1px solid rgba(255,255,255,.32);
+               padding:.24rem .68rem; border-radius:999px; font-size:.74rem; font-weight:600; }
+  .hero .track { margin-top:1rem; height:7px; background:rgba(255,255,255,.25);
                  border-radius:99px; overflow:hidden; position:relative; z-index:1; }
   .hero .track > div { height:100%; background:#fff; border-radius:99px; }
 
   /* ---------- kartu KPI ---------- */
   .kpi { background:#fff; border-radius:16px; padding:1rem 1.05rem; height:100%;
-         border:1px solid #EDEFF8; box-shadow:0 2px 10px -4px rgba(24,27,46,.09);
+         border:1px solid #E6E9F7; box-shadow:0 2px 10px -4px rgba(24,27,46,.1);
          position:relative; overflow:hidden; transition:transform .16s ease, box-shadow .16s ease; }
   .kpi:hover { transform:translateY(-3px); box-shadow:0 12px 26px -14px rgba(24,27,46,.3); }
   .kpi .cap { position:absolute; inset:0 0 auto 0; height:4px; }
   .kpi .row { display:flex; align-items:center; gap:.5rem; margin:.25rem 0 .55rem 0; }
   .kpi .ico { width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
               font-size:.95rem; flex:none; }
-  .kpi .lbl { font-size:.7rem; font-weight:700; color:#7A82A6; text-transform:uppercase;
-              letter-spacing:.07em; }
-  .kpi .val { font-size:1.92rem; font-weight:800; color:#181B2E; line-height:1;
+  .kpi .lbl { font-size:.7rem; font-weight:700; color:#4A5178; text-transform:uppercase;
+              letter-spacing:.06em; }
+  .kpi .val { font-size:1.9rem; font-weight:800; color:#181B2E; line-height:1;
               letter-spacing:-.035em; }
-  .kpi .val small { font-size:.85rem; font-weight:700; color:#A6ADCB; margin-left:.15rem;
+  .kpi .val small { font-size:.85rem; font-weight:700; color:#5A6288; margin-left:.15rem;
                     letter-spacing:0; }
-  .kpi .sub { font-size:.76rem; color:#7A82A6; margin-top:.42rem; line-height:1.35; }
-  .kpi .bar { height:6px; background:#F1F2FA; border-radius:99px; margin-top:.6rem; overflow:hidden; }
+  .kpi .sub { font-size:.76rem; color:#5A6288; margin-top:.42rem; line-height:1.4; }
+  .kpi .bar { height:6px; background:#EEF0FA; border-radius:99px; margin-top:.6rem; overflow:hidden; }
   .kpi .bar > div { height:100%; border-radius:99px; }
 
   /* ---------- kartu insight ---------- */
-  .ins { border-radius:14px; padding:.8rem .95rem; height:100%; border:1px solid transparent; }
-  .ins .t { font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.07em;
-            opacity:.78; margin-bottom:.28rem; }
-  .ins .v { font-size:.98rem; font-weight:700; line-height:1.25; }
-  .ins .d { font-size:.76rem; opacity:.8; margin-top:.2rem; line-height:1.35; }
+  .ins { border-radius:14px; padding:.8rem .95rem; height:100%; border:1px solid transparent;
+         background:#fff; }
+  .ins .t { font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+            margin-bottom:.28rem; display:flex; align-items:center; gap:.38rem; }
+  .ins .dot { width:7px; height:7px; border-radius:50%; display:inline-block; flex:none; }
+  .ins .v { font-size:.96rem; font-weight:700; line-height:1.28; color:#181B2E; }
+  .ins .d { font-size:.76rem; margin-top:.22rem; line-height:1.4; color:#5A6288; }
 
   /* ---------- podium ---------- */
-  .pod { background:#fff; border:1px solid #EDEFF8; border-radius:16px; padding:.95rem;
-         text-align:center; box-shadow:0 2px 10px -4px rgba(24,27,46,.09); height:100%; }
+  .pod { background:#fff; border:1px solid #E6E9F7; border-radius:16px; padding:.95rem;
+         text-align:center; box-shadow:0 2px 10px -4px rgba(24,27,46,.1); height:100%; }
   .pod .m { font-size:1.7rem; line-height:1; }
-  .pod .n { font-size:.88rem; font-weight:700; color:#181B2E; margin-top:.45rem;
-            line-height:1.25; }
-  .pod .k { font-size:1.32rem; font-weight:800; letter-spacing:-.03em; margin-top:.3rem; }
-  .pod .s { font-size:.72rem; color:#7A82A6; margin-top:.15rem; }
+  .pod .n { font-size:.88rem; font-weight:700; color:#181B2E; margin-top:.45rem; line-height:1.25; }
+  .pod .k { font-size:1.3rem; font-weight:800; letter-spacing:-.03em; margin-top:.3rem; }
+  .pod .s { font-size:.72rem; color:#5A6288; margin-top:.15rem; }
 
   /* ---------- umum ---------- */
   .sec { font-size:1rem; font-weight:700; color:#181B2E; margin:.2rem 0 .1rem 0;
          letter-spacing:-.015em; }
-  .sec-sub { font-size:.79rem; color:#7A82A6; margin-bottom:.6rem; }
-  .panel { background:#fff; border:1px solid #EDEFF8; border-radius:16px; padding:1rem 1.1rem;
-           box-shadow:0 2px 10px -4px rgba(24,27,46,.09); }
+  .sec-sub { font-size:.79rem; color:#5A6288; margin-bottom:.6rem; }
   .note { border-radius:12px; padding:.75rem .95rem; font-size:.83rem; line-height:1.5;
           margin:.3rem 0 .9rem 0; }
-  .note.warn { background:#FFF7ED; border:1px solid #FED7AA; color:#9A3412; }
-  .note.ok { background:#ECFDF5; border:1px solid #A7F3D0; color:#065F46; }
+  .note.warn { background:#FFF7ED; border:1px solid #FDBA74; color:#7C2D12; }
+  .note.ok { background:#ECFDF5; border:1px solid #6EE7B7; color:#065F46; }
+  .note b { color: inherit; }
 
-  div[data-testid="stMetricValue"] { font-size:1.35rem; font-weight:800; color:#181B2E; }
   .stTabs [data-baseweb="tab-list"] { gap:.25rem; background:#fff; padding:.3rem;
-      border-radius:13px; border:1px solid #EDEFF8; }
+      border-radius:13px; border:1px solid #E6E9F7; }
   .stTabs [data-baseweb="tab-list"] button { border-radius:9px; font-weight:600;
-      font-size:.85rem; padding:.42rem .95rem; color:#7A82A6; }
-  .stTabs [aria-selected="true"] { background:linear-gradient(120deg,#4F46E5,#7C3AED) !important;
-      color:#fff !important; }
+      font-size:.85rem; padding:.42rem .95rem; color:#4A5178 !important; }
+  .stTabs [aria-selected="true"] { background:linear-gradient(120deg,#4338CA,#6D28D9) !important; }
+  .stTabs [aria-selected="true"] * { color:#fff !important; }
   .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display:none; }
-  div[data-testid="stExpander"] { border:1px solid #EDEFF8; border-radius:13px;
-      background:#fff; }
-  .stDownloadButton button, .stButton button { border-radius:10px; font-weight:600; }
+
+  div[data-testid="stExpander"] { border:1px solid #E6E9F7; border-radius:13px; background:#fff; }
+  .stDownloadButton button, .stButton button { border-radius:10px; font-weight:600;
+      color:#181B2E; border-color:#DDE1F2; }
+  .stButton button[kind="primary"], .stFormSubmitButton button { color:#fff !important; }
 </style>
 """
 
@@ -683,11 +737,13 @@ def kartu_kpi(label: str, nilai: str, sub: str, ikon: str, warna: str,
 
 def kartu_insight(d: dict) -> str:
     c = d["c"]
+    teks = TEKS_AKSEN.get(c, INK)  # varian gelap supaya terbaca di latar terang
     return (
-        f'<div class="ins" style="background:{c}12;border-color:{c}33;color:{c}">'
-        f'<div class="t">{d["t"]}</div>'
-        f'<div class="v" style="color:{INK}">{d["v"]}</div>'
-        f'<div class="d" style="color:{MUTED}">{d["d"]}</div></div>'
+        f'<div class="ins" style="background:{c}0f;border-color:{c}40">'
+        f'<div class="t" style="color:{teks}">'
+        f'<span class="dot" style="background:{c}"></span>{d["t"]}</div>'
+        f'<div class="v">{d["v"]}</div>'
+        f'<div class="d">{d["d"]}</div></div>'
     )
 
 
@@ -719,6 +775,23 @@ def rapikan(fig, tinggi: int = 340, legend: bool = True):
     return fig
 
 
+@contextmanager
+def aman(nama: str):
+    """Isolasi satu panel.
+
+    Tanpa ini, satu kesalahan di panel mana pun menghentikan seluruh script dan
+    halaman terpotong di titik itu. Dengan ini, panel yang bermasalah diganti kotak
+    pesan dan sisa dashboard tetap tampil — sekaligus menunjukkan traceback yang
+    bisa dilaporkan.
+    """
+    try:
+        yield
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Panel **{nama}** gagal dirender — {type(e).__name__}: {e}", icon="⚠️")
+        with st.expander(f"Detail teknis · {nama}"):
+            st.code(traceback.format_exc(), language="text")
+
+
 def judul(teks: str, sub: str = ""):
     st.markdown(f'<div class="sec">{teks}</div>', unsafe_allow_html=True)
     if sub:
@@ -741,7 +814,7 @@ def g_donat_status(rekap: pd.DataFrame):
     ))
     total, ok = int(c.sum()), int(c.get("Tercapai", 0))
     fig.add_annotation(
-        text=f"<b style='font-size:30px;color:{EMERALD}'>{ok}</b><br>"
+        text=f"<b style='font-size:30px;color:{EMERALD_T}'>{ok}</b><br>"
              f"<span style='font-size:11px;color:{MUTED}'>dari {total} tercapai</span>",
         showarrow=False)
     return rapikan(fig, 320)
@@ -795,7 +868,7 @@ def g_tren(resp: pd.DataFrame, start, end, pace_harian: float | None):
         fig.add_hline(y=pace_harian, line=dict(color=EMERALD, width=1.5, dash="dot"),
                       annotation_text=f"Pace ideal {pace_harian:.1f} km/hari",
                       annotation_position="top left",
-                      annotation_font=dict(size=10, color=EMERALD))
+                      annotation_font=dict(size=11, color=EMERALD_T))
     fig.update_layout(
         yaxis=dict(title="KM per hari"),
         yaxis2=dict(title="Kumulatif (km)", overlaying="y", side="right",
@@ -809,11 +882,11 @@ def g_hari(resp: pd.DataFrame):
         return None
     s = resp.groupby(resp["Tanggal"].dt.dayofweek).agg(
         KM=(COL_KM, "sum"), Akt=(COL_KM, "size")).reindex(range(7), fill_value=0)
-    warna = [EMERALD if i == int(s["KM"].idxmax()) else "#C7CBE8" for i in range(7)]
+    warna = [EMERALD if i == int(s["KM"].idxmax()) else "#AEB5DC" for i in range(7)]
     fig = go.Figure(go.Bar(
         x=HARI_ID, y=s["KM"], marker=dict(color=warna, line=dict(width=0)),
         text=[f"{v:.0f}" if v else "" for v in s["KM"]], textposition="outside",
-        textfont=dict(size=10, color=MUTED), customdata=s["Akt"],
+        textfont=dict(size=11, color=MUTED), customdata=s["Akt"],
         hovertemplate="<b>%{x}</b><br>%{y:.1f} km · %{customdata} aktivitas<extra></extra>",
     ))
     fig.update_yaxes(title_text="Total KM", range=[0, max(s["KM"].max() * 1.25, 1)])
@@ -827,7 +900,7 @@ def g_jam(resp: pd.DataFrame):
     s = ts.dt.hour.value_counts().reindex(range(24), fill_value=0).sort_index()
     fig = go.Figure(go.Bar(
         x=[f"{h:02d}" for h in s.index], y=s.values,
-        marker=dict(color=s.values, colorscale=[[0, "#E4E7F7"], [1, CYAN]],
+        marker=dict(color=s.values, colorscale=[[0, "#D8DDF2"], [1, CYAN]],
                     line=dict(width=0)),
         hovertemplate="Pukul %{x}:00<br>%{y} submission<extra></extra>",
     ))
@@ -906,7 +979,7 @@ def g_entitas(rekap: pd.DataFrame):
         hovertemplate="<b>%{x}</b><br>Aktif %{y} orang<extra></extra>"))
     fig.add_trace(go.Bar(
         x=d["Entitas"], y=d["N"] - d["A"], name="Belum submit",
-        marker=dict(color="#DFE3F3", line=dict(width=0)),
+        marker=dict(color="#C4CAE6", line=dict(width=0)),
         hovertemplate="<b>%{x}</b><br>Belum %{y} orang<extra></extra>"))
     fig.update_layout(barmode="stack")
     fig.update_yaxes(title_text="Jumlah karyawan")
@@ -1106,38 +1179,40 @@ def main():
     r = hitung_ringkasan(rekap, ratio)
 
     # ---------------- KPI ----------------
-    k = st.columns(5)
-    k[0].markdown(kartu_kpi(
-        "Partisipasi", f"{r['aktif']}<small>/{r['n']}</small>",
-        f"{r['partisipasi']:.0f}% karyawan sudah submit", "👥", INDIGO,
-        r["partisipasi"]), unsafe_allow_html=True)
-    k[1].markdown(kartu_kpi(
-        "Total Jarak", f"{r['total_km']:,.0f}<small> km</small>",
-        f"dari target kolektif {r['total_target']:,.0f} km", "🏃", CYAN,
-        r["progres_km"]), unsafe_allow_html=True)
-    k[2].markdown(kartu_kpi(
-        "Capai Target", f"{r['tercapai']}<small>/{r['n']}</small>",
-        f"{r['pct_tercapai']:.0f}% dari karyawan terpilih", "🏆", EMERALD,
-        r["pct_tercapai"]), unsafe_allow_html=True)
-    wp = EMERALD if r["pace_pct"] >= 100 else (AMBER if r["pace_pct"] >= 70 else ROSE)
-    k[3].markdown(kartu_kpi(
-        "Pace vs Ideal", f"{r['pace_pct']:.0f}<small>%</small>",
-        f"pace ideal hari ini {r['pace_ideal']:,.0f} km", "⚡", wp,
-        min(r["pace_pct"], 100)), unsafe_allow_html=True)
-    proy = r["proyeksi"] / r["total_target"] * 100 if r["total_target"] else 0
-    wr = EMERALD if proy >= 100 else (AMBER if proy >= 70 else ROSE)
-    k[4].markdown(kartu_kpi(
-        "Proyeksi Akhir Bulan", f"{r['proyeksi']:,.0f}<small> km</small>",
-        f"{proy:.0f}% target · {r['aktivitas']} aktivitas tercatat", "🎯", wr,
-        min(proy, 100)), unsafe_allow_html=True)
+    with aman("Kartu KPI"):
+        k = st.columns(5)
+        k[0].markdown(kartu_kpi(
+            "Partisipasi", f"{r['aktif']}<small>/{r['n']}</small>",
+            f"{r['partisipasi']:.0f}% karyawan sudah submit", "👥", INDIGO,
+            r["partisipasi"]), unsafe_allow_html=True)
+        k[1].markdown(kartu_kpi(
+            "Total Jarak", f"{r['total_km']:,.0f}<small> km</small>",
+            f"dari target kolektif {r['total_target']:,.0f} km", "🏃", CYAN,
+            r["progres_km"]), unsafe_allow_html=True)
+        k[2].markdown(kartu_kpi(
+            "Capai Target", f"{r['tercapai']}<small>/{r['n']}</small>",
+            f"{r['pct_tercapai']:.0f}% dari karyawan terpilih", "🏆", EMERALD,
+            r["pct_tercapai"]), unsafe_allow_html=True)
+        wp = EMERALD if r["pace_pct"] >= 100 else (AMBER if r["pace_pct"] >= 70 else ROSE)
+        k[3].markdown(kartu_kpi(
+            "Pace vs Ideal", f"{r['pace_pct']:.0f}<small>%</small>",
+            f"pace ideal hari ini {r['pace_ideal']:,.0f} km", "⚡", wp,
+            min(r["pace_pct"], 100)), unsafe_allow_html=True)
+        proy = r["proyeksi"] / r["total_target"] * 100 if r["total_target"] else 0
+        wr = EMERALD if proy >= 100 else (AMBER if proy >= 70 else ROSE)
+        k[4].markdown(kartu_kpi(
+            "Proyeksi Akhir Bulan", f"{r['proyeksi']:,.0f}<small> km</small>",
+            f"{proy:.0f}% target · {r['aktivitas']} aktivitas tercatat", "🎯", wr,
+            min(proy, 100)), unsafe_allow_html=True)
 
     # ---------------- insight ----------------
-    ins = susun_insight(rekap, resp, r, sisa_hari)
-    if ins:
-        st.markdown('<div style="height:.7rem"></div>', unsafe_allow_html=True)
-        cols = st.columns(len(ins))
-        for col, d in zip(cols, ins):
-            col.markdown(kartu_insight(d), unsafe_allow_html=True)
+    with aman("Kartu insight"):
+        ins = susun_insight(rekap, resp, r, sisa_hari)
+        if ins:
+            st.markdown('<div style="height:.7rem"></div>', unsafe_allow_html=True)
+            cols = st.columns(len(ins))
+            for col, d in zip(cols, ins):
+                col.markdown(kartu_insight(d), unsafe_allow_html=True)
 
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
@@ -1145,13 +1220,13 @@ def main():
         ["Ringkasan", "Leaderboard", "Tren & Pola", "Breakdown", "Tindak Lanjut"])
 
     # ---------------- ringkasan ----------------
-    with t1:
+    with t1, aman("Ringkasan"):
         podium = rekap[rekap["Aktual KM"] > 0].nlargest(3, "Aktual KM")
         if len(podium) >= 3:
             judul("Podium Periode Ini")
             pc = st.columns(3)
             for col, (medali, warna), (_, row) in zip(
-                    pc, [("🥇", "#EAB308"), ("🥈", "#94A3B8"), ("🥉", "#D97706")],
+                    pc, [("🥇", "#A16207"), ("🥈", "#475569"), ("🥉", "#9A3412")],
                     podium.iterrows()):
                 col.markdown(kartu_podium(
                     medali, row["Nama"], row["Aktual KM"],
@@ -1192,7 +1267,7 @@ def main():
             st.plotly_chart(f, width="stretch") if f else st.info("Belum ada aktivitas.")
 
     # ---------------- leaderboard ----------------
-    with t2:
+    with t2, aman("Leaderboard"):
         judul("Peringkat Peserta",
               f"Top {top_n} berdasarkan jarak · warna batang = persentase target")
         f = g_leaderboard(rekap, top_n)
@@ -1218,7 +1293,7 @@ def main():
                     "Pencapaian", format="%.0f%%", min_value=0, max_value=100)})
 
     # ---------------- tren ----------------
-    with t3:
+    with t3, aman("Tren & Pola"):
         judul("Tren Aktivitas Harian",
               "Batang = jarak per hari · area = akumulasi periode berjalan")
         if resp.empty:
@@ -1257,7 +1332,7 @@ def main():
                 st.plotly_chart(f, width="stretch")
 
     # ---------------- breakdown ----------------
-    with t4:
+    with t4, aman("Breakdown"):
         a, b = st.columns(2)
         with a:
             judul("Total Jarak per Divisi")
@@ -1300,7 +1375,7 @@ def main():
                     format="%.0f%%", min_value=0, max_value=100)})
 
     # ---------------- tindak lanjut ----------------
-    with t5:
+    with t5, aman("Tindak Lanjut"):
         judul("Daftar Tindak Lanjut",
               "Karyawan yang perlu diingatkan sebelum periode berakhir")
         fu = rekap[rekap["Status"].isin(["Belum Mulai", "Tertinggal"])].copy()

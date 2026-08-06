@@ -1,9 +1,11 @@
+# Mengunci tema terang. Tanpa base="light", browser/OS dalam mode gelap membuat
+# Streamlit memakai teks terang di atas latar terang milik dashboard.
 [theme]
 base = "light"
-primaryColor = "#2563EB"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F8FAFC"
-textColor = "#0F172A"
+primaryColor = "#4F46E5"
+backgroundColor = "#F5F6FC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#181B2E"
 font = "sans serif"
 
 [server]

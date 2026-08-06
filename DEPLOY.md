@@ -3,15 +3,25 @@
 ## ⚠️ Baca ini dulu
 
 Dashboard ini menampilkan **nama karyawan, NIK, dan jabatan** — data pribadi.
-Streamlit Community Cloud menurunkan hak akses app dari repo GitHub-nya: repo publik →
-**app publik dan bisa terindeks mesin pencari**. Jadi:
 
-- **Repo GitHub harus PRIVATE**, supaya app-nya ikut private
-- Community Cloud hanya mengizinkan **satu private app** per akun — kalau slot itu sudah
-  terpakai app lain, app baru dari repo private tidak bisa dideploy sampai app lama
-  dijadikan publik atau dihapus
+Setup yang dipakai di sini: **app PUBLIC + gerbang kata sandi**. Link bisa dibagikan
+bebas ke grup WhatsApp / email kantor tanpa perlu mendaftarkan email satu per satu,
+tapi datanya tetap tidak terbuka ke internet.
+
+Kenapa kata sandinya wajib: opsi public di Streamlit bunyinya *"This app is public and
+**searchable**"* — jadi bukan cuma "yang punya link". App bisa terindeks mesin pencari
+dan muncul di galeri Streamlit. Tanpa gerbang, nama dan jabatan 66 karyawan terbuka ke
+siapa pun, dan tombol unduh CSV di tab Detail juga membawa NIK.
+
+Catatan lain:
+
+- **Repo GitHub tetap boleh PRIVATE** walaupun app-nya public — permission awal memang
+  diturunkan dari repo, tapi bisa diubah dari App settings. Source code tidak ikut terbuka.
 - **Jangan pernah commit** file `.xlsx`/`.csv` data karyawan atau JSON service account.
-  `.gitignore` di repo ini sudah memblokir keduanya
+  `.gitignore` di repo ini sudah memblokir keduanya.
+- Kalau suatu saat mau app benar-benar private (akses per-email, tanpa kata sandi),
+  cukup kosongkan blok `[auth]` di Secrets lalu set app jadi private. Community Cloud
+  hanya mengizinkan **satu private app** per akun.
 
 ---
 
@@ -41,7 +51,7 @@ git remote add origin https://github.com/<user>/hemp-dashboard.git
 git push -u origin main
 ```
 
-Buat repo-nya di GitHub sebagai **Private**.
+Buat repo-nya di GitHub sebagai **Private** (app-nya tetap bisa dijadikan public nanti).
 
 Cek sebelum push:
 
@@ -84,6 +94,9 @@ Sheet tetap private. Yang dikasih akses cuma robot service account-nya.
    JSON tadi):
 
 ```toml
+[auth]
+password = "ganti-dengan-kata-sandi-kantor"
+
 [gsheet]
 sheet_id = "1I30t7uLOzwBMVyq0k-Rfy1NTzGUFLbT9v37XeFjKbF0"
 worksheet_responses = "Form Responses 1"
@@ -110,16 +123,31 @@ universe_domain = "googleapis.com"
 
 4. **Deploy**. Build pertama sekitar 2–5 menit.
 
-Kalau secrets terisi benar, sidebar otomatis menampilkan opsi
-**"Google Sheet (service account)"** sebagai default dan langsung memuat data.
+Kalau secrets terisi benar, app langsung membaca sheet lewat service account tanpa
+pilihan apa pun di UI. Kalau blok `[gcp_service_account]` tidak ada, app otomatis
+jatuh ke CSV export — dan sheet harus di-share *Anyone with the link → Viewer*.
 
 ---
 
-## 4. Atur siapa yang boleh lihat
+## 4. Jadikan app public
 
-App → **Manage app → Settings → Sharing**. Tambahkan email tim HR/management ke daftar
-viewer satu per satu (belum ada opsi allow-list per domain). Mereka login pakai Google
-atau lewat magic link yang dikirim ke email.
+App → **Manage app → Settings → Sharing** → pilih **"This app is public and searchable"**.
+
+Setelah itu siapa pun yang membuka URL akan disambut halaman kata sandi lebih dulu.
+Bagikan URL + kata sandinya ke lingkungan kantor.
+
+**Pengelolaan kata sandi**
+
+- Ganti kapan saja dari **App settings → Secrets** (ubah `[auth] password` → Save).
+  App restart otomatis dan semua sesi lama ikut logout.
+- Ganti setiap ada karyawan resign atau kalau kata sandinya sudah tersebar terlalu luas.
+- Jangan pakai kata sandi yang sama dengan sistem kantor lain.
+- Kata sandi ini bersifat bersama — tidak ada jejak siapa yang membuka. Kalau butuh
+  audit per orang, pakai app private + daftar viewer per email.
+
+**Alternatif (akses per-email, tanpa kata sandi):** kosongkan `[auth]` di Secrets, set
+app jadi **private**, lalu tambahkan email tim HR/management ke daftar viewer satu per
+satu. Belum ada opsi allow-list per domain. Mereka login pakai Google atau magic link.
 
 ---
 
@@ -133,8 +161,11 @@ atau lewat magic link yang dikirim ke email.
 | Opsi service account tidak muncul di sidebar | Secrets belum tersimpan, atau blok `[gcp_service_account]` salah nama |
 | `No module named 'gspread'` | `requirements.txt` belum ke-push — cek isinya lalu **Reboot app** |
 | Error parsing private key | `private_key` harus pakai triple-quote `"""` dan baris-barisnya utuh |
+| Halaman kata sandi tidak muncul | Blok `[auth]` belum ada di Secrets, atau `password` masih kosong |
+| Lupa kata sandi | Lihat / ubah di App settings → Secrets |
 | App "zzz / waking up" | Normal: app tidur setelah ~12 jam tanpa traffic, hidup lagi otomatis saat dibuka |
-| Data tidak berubah padahal sheet sudah update | Cache 5 menit — klik **🔄 Refresh data** di sidebar |
+| Data tidak berubah padahal sheet sudah update | Cache 5 menit — klik **🔄 Muat ulang** di baris filter |
+| Halaman cuma menampilkan error merah | Sheet tidak terbaca. Pesan error dan petunjuk perbaikannya ada di layar |
 | `MemoryError` / app restart | Limit ~1 GB. Untuk skala data ini seharusnya aman |
 
 **Update dashboard:** cukup `git push` — Community Cloud rebuild otomatis.
@@ -145,5 +176,7 @@ Kalau perubahan menyentuh `requirements.txt`, lakukan **Reboot app** dari menu M
 ## Alternatif tanpa service account
 
 Kalau setup Google Cloud terasa berat, mode **"Google Sheet (link publik)"** juga
-tersedia — tapi sheet harus di-share *Anyone with the link → Viewer*. Untuk data yang
-berisi nama dan NIK karyawan, ini tidak disarankan.
+dipakai otomatis kalau `[gcp_service_account]` tidak diisi — tapi sheet harus di-share
+*Anyone with the link → Viewer*. Artinya sheet
+mentahnya (berisi nama dan NIK) bisa dibuka siapa pun yang tahu Sheet ID, terlepas dari
+gerbang kata sandi di dashboard. Untuk data ini, service account jauh lebih aman.
