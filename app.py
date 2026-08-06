@@ -99,7 +99,7 @@ BULAN_ID = {
 BULAN_NAMA = {v: k.capitalize() for k, v in BULAN_ID.items()}
 
 DEFAULT_SHEET_ID = "1I30t7uLOzwBMVyq0k-Rfy1NTzGUFLbT9v37XeFjKbF0"
-DEFAULT_GID_RESP = "1186413594"
+DEFAULT_GID_ROSTER = "496436723"  # gid tab Sheet1, cadangan kalau nama tak cocok
 DEFAULT_WS_RESP = "Form Responses 1"
 DEFAULT_WS_ROSTER = "Sheet1"
 
@@ -510,41 +510,81 @@ def load_excel(content: bytes):
     return _normalize(resp, roster)
 
 
-def _baca_tab(sheet_id: str, nama: str | None, gid: str | None):
-    """Ambil satu tab lewat NAMA (gviz), dengan gid sebagai cadangan.
+def _cocok(df, wajib: tuple[str, ...], terlarang: tuple[str, ...]) -> bool:
+    """Pastikan tabel yang terambil memang tab yang diminta.
 
-    Nama tab dipakai lebih dulu karena gid bisa basi: kalau Google Form
-    di-relink, tab jawaban dibuat ulang dan mendapat gid baru. Permintaan ke gid
-    lama lalu dialihkan diam-diam ke tab lain — dashboard tampak jalan padahal
-    membaca tabel yang salah.
+    Endpoint gviz TIDAK melempar error kalau nama tab tidak cocok — ia diam-diam
+    mengembalikan tab default. Tanpa pemeriksaan kolom, tab master bisa terisi
+    data Form Responses dan jumlah karyawan menyusut jadi sebanyak yang submit
+    saja, tanpa satu pun pesan kesalahan.
     """
-    gviz = ("https://docs.google.com/spreadsheets/d/{sid}"
-            "/gviz/tq?tqx=out:csv&headers=1&sheet={nama}")
-    ekspor = "https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
+    if df is None or df.empty:
+        return False
+    kolom = {_clean(c) for c in df.columns}
+    if any(k not in kolom for k in wajib):
+        return False
+    return not any(k in kolom for k in terlarang)
 
+
+def _baca_tab(sheet_id: str, nama: str | None, gid: str | None,
+              wajib: tuple[str, ...] = (), terlarang: tuple[str, ...] = ()):
+    """Coba beberapa cara baca, pakai yang pertama menghasilkan tabel yang benar.
+
+    Urutan: gviz by nama -> gviz by gid -> export by gid. Nama didahulukan karena
+    gid bisa basi (Form yang di-relink membuat tab jawaban baru dengan gid baru).
+    """
+    pola = []
     if nama:
-        try:
-            return pd.read_csv(gviz.format(sid=sheet_id, nama=quote(nama, safe="")))
-        except Exception:  # noqa: BLE001
-            pass
+        pola.append(("nama '%s'" % nama,
+                     "https://docs.google.com/spreadsheets/d/{sid}"
+                     "/gviz/tq?tqx=out:csv&headers=1&sheet={nama}".format(
+                         sid=sheet_id, nama=quote(nama, safe=""))))
     if gid:
+        pola.append(("gid %s (gviz)" % gid,
+                     "https://docs.google.com/spreadsheets/d/{sid}"
+                     "/gviz/tq?tqx=out:csv&headers=1&gid={gid}".format(
+                         sid=sheet_id, gid=gid)))
+        pola.append(("gid %s (export)" % gid,
+                     "https://docs.google.com/spreadsheets/d/{sid}"
+                     "/export?format=csv&gid={gid}".format(sid=sheet_id, gid=gid)))
+
+    cadangan = None
+    for label, url in pola:
         try:
-            return pd.read_csv(ekspor.format(sid=sheet_id, gid=gid))
+            df = pd.read_csv(url)
         except Exception:  # noqa: BLE001
-            pass
-    return None
+            continue
+        if _cocok(df, wajib, terlarang):
+            return df, label
+        if cadangan is None and df is not None and not df.empty:
+            cadangan = (df, label)
+
+    # Ada tabel yang terbaca tapi tidak ada yang cocok -> kembalikan None supaya
+    # pemanggil bisa melapor, bukan memakai tabel yang salah.
+    return (None, cadangan[1] + " (kolom tidak cocok)") if cadangan else (None, "gagal")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_gsheet_csv(sheet_id: str, nama_resp: str, nama_roster: str | None,
                     gid_resp: str | None = None, gid_roster: str | None = None):
     """Baca lewat endpoint publik. Sheet harus di-share 'Anyone with the link'."""
-    resp = _baca_tab(sheet_id, nama_resp, gid_resp)
+    resp, asal_resp = _baca_tab(
+        sheet_id, nama_resp, gid_resp,
+        wajib=(COL_NAMA, COL_KM))
     if resp is None:
         raise ValueError(
-            f"Tab '{nama_resp}' tidak bisa dibaca. Pastikan Google Sheet sudah "
-            f"di-share 'Anyone with the link -> Viewer' dan nama tabnya sama persis.")
-    return _normalize(resp, _baca_tab(sheet_id, nama_roster, gid_roster))
+            f"Tab jawaban tidak terbaca (dicari: '{nama_resp}', hasil: {asal_resp}). "
+            f"Pastikan sheet di-share 'Anyone with the link -> Viewer', nama tabnya "
+            f"sama persis, dan tab itu memuat kolom '{COL_NAMA}' serta '{COL_KM}'.")
+
+    # Tab master wajib punya kolom nama, dan TIDAK boleh punya kolom jarak —
+    # kolom jarak adalah ciri tab jawaban, penanda bahwa yang terambil salah tab.
+    roster, asal_roster = _baca_tab(
+        sheet_id, nama_roster, gid_roster,
+        wajib=(COL_NAMA,), terlarang=(COL_KM, COL_TS))
+
+    df, rost, n_master = _normalize(resp, roster)
+    return df, rost, n_master, {"asal_resp": asal_resp, "asal_roster": asal_roster}
 
 
 def _ws_to_df(ws) -> pd.DataFrame:
@@ -1206,9 +1246,10 @@ def ambil_data():
         return load_gsheet_csv(
             sid, tab_resp, tab_roster,
             str(_secret("gsheet.gid_responses", "") or "") or None,
-            str(_secret("gsheet.gid_roster", "") or "") or None)
+            str(_secret("gsheet.gid_roster", DEFAULT_GID_ROSTER) or "") or None)
 
     catatan = ""
+    asal = {"asal_resp": f"tab '{tab_resp}'", "asal_roster": f"tab '{tab_roster}'"}
     if HAS_GSPREAD and _secret("gcp_service_account") is not None:
         try:
             resp, roster, n_master = load_gsheet_sa(
@@ -1219,22 +1260,21 @@ def ambil_data():
             # publik, endpoint publik tetap bisa dipakai. Kegagalan tetap
             # dilaporkan supaya tidak lewat begitu saja.
             try:
-                resp, roster, n_master = _publik()
+                resp, roster, n_master, asal = _publik()
                 mode = "endpoint publik (service account dilewati)"
                 catatan = str(e)
             except Exception:  # noqa: BLE001
                 raise e from None
     else:
-        resp, roster, n_master = _publik()
+        resp, roster, n_master, asal = _publik()
         mode = "endpoint publik"
-
-    sumber_resp = f"tab '{tab_resp}'"
 
     meta = {
         "mode": mode,
         "sheet_id": sid,
-        "sumber_resp": sumber_resp,
+        "sumber_resp": asal.get("asal_resp", f"tab '{tab_resp}'"),
         "tab_roster": tab_roster or "(tidak diatur)",
+        "asal_roster": asal.get("asal_roster", "-"),
         "n_resp": len(resp),
         "n_master": n_master,
         "n_roster": len(roster),
@@ -1335,8 +1375,8 @@ def main():
             f"hanya dari {meta['n_roster']} orang yang pernah submit — angka "
             f"partisipasi karenanya selalu mendekati 100% dan tidak mencerminkan "
             f"seluruh karyawan. Atur `[gsheet] worksheet_roster` (nama tab persis) "
-            f"di **App settings → Secrets**. Saat ini dicari: "
-            f"`{meta['tab_roster']}`.", icon="⚠️")
+            f"di **App settings → Secrets**. Saat ini dicari `{meta['tab_roster']}`, "
+            f"hasil: `{meta.get('asal_roster', '-')}`.", icon="⚠️")
 
     with st.expander("⚙️ Pengaturan lanjutan"):
         target_default = st.number_input(
@@ -1352,6 +1392,7 @@ def main():
             ("Tab responses", meta["sumber_resp"]),
             ("Baris responses terbaca", f"{meta['n_resp']} baris"),
             ("Tab master karyawan", meta["tab_roster"]),
+            ("Master diambil lewat", meta.get("asal_roster", "-")),
             ("Nama di tab master", f"{meta['n_master']} orang"
                                    if meta["n_master"] else "GAGAL DIBACA"),
             ("Total karyawan dipantau", f"{meta['n_roster']} orang"),
