@@ -1294,9 +1294,9 @@ def main():
             berjalan / total_hari * 100 if total_hari else 0), unsafe_allow_html=True)
 
     # ---------------- posisi peserta ----------------
-    with aman("Posisi saya"):
+    with aman("Pencapaian Saya"):
         st.markdown('<div style="height:.8rem"></div>', unsafe_allow_html=True)
-        judul("Cek Posisi Saya", "Pilih nama untuk melihat sisa target sendiri")
+        judul("Cek Pencapaian Saya", "Pilih nama untuk melihat sisa target sendiri")
 
         urut = rekap.sort_values(["Aktual KM", "Nama"], ascending=[False, True])
         nama_pilih = st.selectbox(
