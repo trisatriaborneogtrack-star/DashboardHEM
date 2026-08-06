@@ -13,3 +13,10 @@ maxUploadSize = 20
 
 [browser]
 gatherUsageStats = false
+
+# Mematikan "magic" Streamlit: tanpa ini, ekspresi telanjang di script (mis.
+# `st.plotly_chart(f) if f else st.info(...)`) ikut dirender, dan objek
+# DeltaGenerator yang dikembalikan tampil sebagai dokumentasi API sepanjang
+# ribuan baris di halaman.
+[runner]
+magicEnabled = false
