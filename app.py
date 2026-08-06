@@ -76,15 +76,15 @@ GRID = "#E3E6F4"
 
 PALETTE = [INDIGO, CYAN, EMERALD, AMBER, PINK, VIOLET, "#14B8A6", "#F97316"]
 
-STATUS_ORDER = ["Tercapai", "On Track", "Tertinggal", "Belum Mulai"]
+STATUS_ORDER = ["Tercapai", "Sesuai Jadwal", "Tertinggal", "Belum Mulai"]
 STATUS_COLOR = {
     "Tercapai": EMERALD,
-    "On Track": INDIGO,
+    "Sesuai Jadwal": INDIGO,
     "Tertinggal": AMBER,
     "Belum Mulai": ROSE,
 }
 STATUS_EMOJI = {
-    "Tercapai": "🏆", "On Track": "🚀", "Tertinggal": "⚡", "Belum Mulai": "💤",
+    "Tercapai": "🏆", "Sesuai Jadwal": "🚀", "Tertinggal": "⚡", "Belum Mulai": "💤",
 }
 
 TOP_GRAFIK = 15  # jumlah batang di grafik peringkat (tabel tetap memuat semua)
@@ -699,15 +699,16 @@ def build_rekap(resp: pd.DataFrame, roster: pd.DataFrame,
         rekap["Target KM"] > 0, rekap["Aktual KM"] / rekap["Target KM"] * 100, 0.0
     )
     rekap["Sisa KM"] = (rekap["Target KM"] - rekap["Aktual KM"]).clip(lower=0)
-    rekap["Target Pace KM"] = rekap["Target KM"] * ratio
+    # Bagian target yang seharusnya sudah tercapai sampai hari ini
+    rekap["Target Sampai Hari Ini"] = rekap["Target KM"] * ratio
 
     rekap["Status"] = np.select(
         [
             rekap["Aktual KM"] <= 0,
             rekap["Aktual KM"] >= rekap["Target KM"],
-            rekap["Aktual KM"] >= rekap["Target Pace KM"],
+            rekap["Aktual KM"] >= rekap["Target Sampai Hari Ini"],
         ],
-        ["Belum Mulai", "Tercapai", "On Track"],
+        ["Belum Mulai", "Tercapai", "Sesuai Jadwal"],
         default="Tertinggal",
     )
     rekap["Status"] = pd.Categorical(rekap["Status"], categories=STATUS_ORDER, ordered=True)
@@ -773,7 +774,7 @@ def hitung_ringkasan(rekap: pd.DataFrame, ratio: float) -> dict:
     total_km = float(rekap["Aktual KM"].sum())
     total_target = float(rekap["Target KM"].sum())
     tercapai = int((rekap["Status"] == "Tercapai").sum())
-    pace_ideal = total_target * ratio
+    target_hari_ini = total_target * ratio
     return {
         "n": n,
         "aktif": aktif,
@@ -783,11 +784,11 @@ def hitung_ringkasan(rekap: pd.DataFrame, ratio: float) -> dict:
         "progres_km": total_km / total_target * 100 if total_target else 0.0,
         "tercapai": tercapai,
         "pct_tercapai": tercapai / n * 100 if n else 0.0,
-        "pace_ideal": pace_ideal,
-        "pace_pct": total_km / pace_ideal * 100 if pace_ideal else 0.0,
+        "target_hari_ini": target_hari_ini,
+        "capaian_jadwal": total_km / target_hari_ini * 100 if target_hari_ini else 0.0,
         "aktivitas": int(rekap["Total Aktivitas"].sum()),
         "km_per_aktif": total_km / aktif if aktif else 0.0,
-        # Ekstrapolasi linear dari pace saat ini ke akhir bulan
+        # Ekstrapolasi linear dari laju saat ini ke akhir bulan
         "proyeksi": total_km / ratio if ratio > 0 else 0.0,
     }
 
@@ -839,11 +840,11 @@ def susun_insight(rekap: pd.DataFrame, resp: pd.DataFrame, r: dict,
             "c": ROSE,
         })
 
-    if r["pace_pct"] >= 100:
+    if r["capaian_jadwal"] >= 100:
         out.append({
-            "t": "Status program", "v": "Di atas pace ideal",
-            "d": f"Terkumpul {r['total_km']:.0f} km, {r['pace_pct'] - 100:.0f}% "
-                 f"di atas target hari ini",
+            "t": "Status program", "v": "Lebih cepat dari jadwal",
+            "d": f"Terkumpul {r['total_km']:.0f} km, {r['capaian_jadwal'] - 100:.0f}% "
+                 f"di atas target sampai hari ini",
             "c": EMERALD,
         })
 
@@ -994,7 +995,7 @@ def g_leaderboard(rekap: pd.DataFrame, n: int):
     return rapikan(fig, max(300, 33 * len(d) + 85), legend=False)
 
 
-def g_tren(resp: pd.DataFrame, start, end, pace_harian: float | None):
+def g_tren(resp: pd.DataFrame, start, end, target_harian: float | None):
     idx = pd.date_range(start, end, freq="D")
     d = (resp.groupby("Tanggal")
          .agg(KM=(COL_KM, "sum"), Akt=(COL_KM, "size"), Org=("Peserta", "nunique"))
@@ -1019,9 +1020,9 @@ def g_tren(resp: pd.DataFrame, start, end, pace_harian: float | None):
         hovertemplate="<b>%{x|%d %b}</b><br>%{y:.2f} km<br>"
                       "%{customdata[0]} aktivitas · %{customdata[1]} peserta<extra></extra>",
     ))
-    if pace_harian:
-        fig.add_hline(y=pace_harian, line=dict(color=EMERALD, width=1.5, dash="dot"),
-                      annotation_text=f"Pace ideal {pace_harian:.1f} km/hari",
+    if target_harian:
+        fig.add_hline(y=target_harian, line=dict(color=EMERALD, width=1.5, dash="dot"),
+                      annotation_text=f"Kebutuhan harian {target_harian:.1f} km",
                       annotation_position="top left",
                       annotation_font=dict(size=11, color=EMERALD_T))
     fig.update_layout(
@@ -1201,18 +1202,33 @@ def ambil_data():
     tab_resp = str(_secret("gsheet.worksheet_responses", DEFAULT_WS_RESP))
     tab_roster = str(_secret("gsheet.worksheet_roster", DEFAULT_WS_ROSTER) or "") or None
 
-    if HAS_GSPREAD and _secret("gcp_service_account") is not None:
-        resp, roster, n_master = load_gsheet_sa(
-            sid, tab_resp, tab_roster, st.secrets["gcp_service_account"])
-        mode = "service account"
-        sumber_resp = f"tab '{tab_resp}'"
-    else:
-        resp, roster, n_master = load_gsheet_csv(
+    def _publik():
+        return load_gsheet_csv(
             sid, tab_resp, tab_roster,
             str(_secret("gsheet.gid_responses", "") or "") or None,
             str(_secret("gsheet.gid_roster", "") or "") or None)
+
+    catatan = ""
+    if HAS_GSPREAD and _secret("gcp_service_account") is not None:
+        try:
+            resp, roster, n_master = load_gsheet_sa(
+                sid, tab_resp, tab_roster, st.secrets["gcp_service_account"])
+            mode = "service account"
+        except Exception as e:  # noqa: BLE001
+            # Kredensial bermasalah bukan alasan untuk berhenti: kalau sheet-nya
+            # publik, endpoint publik tetap bisa dipakai. Kegagalan tetap
+            # dilaporkan supaya tidak lewat begitu saja.
+            try:
+                resp, roster, n_master = _publik()
+                mode = "endpoint publik (service account dilewati)"
+                catatan = str(e)
+            except Exception:  # noqa: BLE001
+                raise e from None
+    else:
+        resp, roster, n_master = _publik()
         mode = "endpoint publik"
-        sumber_resp = f"tab '{tab_resp}'"
+
+    sumber_resp = f"tab '{tab_resp}'"
 
     meta = {
         "mode": mode,
@@ -1223,6 +1239,7 @@ def ambil_data():
         "n_master": n_master,
         "n_roster": len(roster),
         "roster_ok": n_master > 0,
+        "catatan": catatan,
     }
     return resp, roster, meta
 
@@ -1305,6 +1322,13 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
+    if meta.get("catatan"):
+        st.info(
+            f"Blok `[gcp_service_account]` di Secrets bermasalah, jadi dilewati — "
+            f"data dibaca lewat endpoint publik dan dashboard tetap berjalan. "
+            f"Kalau sheet memang sudah di-share publik, **hapus saja blok itu dari "
+            f"Secrets**. Rincian: {meta['catatan']}", icon="ℹ️")
+
     if not meta["roster_ok"]:
         st.warning(
             f"**Tab master karyawan tidak terbaca**, jadi jumlah karyawan dihitung "
@@ -1318,7 +1342,7 @@ def main():
         target_default = st.number_input(
             "Target default untuk yang belum submit (km)", 1.0, 100.0, 7.0, 1.0,
             help="Dipakai karena kategori peserta belum diketahui sebelum submit pertama.")
-        st.caption(f"Ambang On Track: {ratio * 100:.0f}% dari target bulanan. "
+        st.caption(f"Ambang Sesuai Jadwal: {ratio * 100:.0f}% dari target bulanan. "
                    f"Seluruh {len(roster_all)} karyawan ditampilkan tanpa filter.")
 
         st.markdown("**Diagnostik sumber data**")
@@ -1373,11 +1397,12 @@ def main():
             "Capai Target", f"{r['tercapai']}<small>/{r['n']}</small>",
             f"{r['pct_tercapai']:.0f}% dari karyawan terpilih", "🏆", EMERALD,
             r["pct_tercapai"]), unsafe_allow_html=True)
-        wp = EMERALD if r["pace_pct"] >= 100 else (AMBER if r["pace_pct"] >= 70 else ROSE)
+        wj = r["capaian_jadwal"]
+        wp = EMERALD if wj >= 100 else (AMBER if wj >= 70 else ROSE)
         k[3].markdown(kartu_kpi(
-            "Pace vs Ideal", f"{r['pace_pct']:.0f}<small>%</small>",
-            f"pace ideal hari ini {r['pace_ideal']:,.0f} km", "⚡", wp,
-            min(r["pace_pct"], 100)), unsafe_allow_html=True)
+            "Capaian vs Jadwal", f"{wj:.0f}<small>%</small>",
+            f"mestinya sudah {r['target_hari_ini']:,.0f} km sampai hari ini", "⚡", wp,
+            min(wj, 100)), unsafe_allow_html=True)
         proy = r["proyeksi"] / r["total_target"] * 100 if r["total_target"] else 0
         wr = EMERALD if proy >= 100 else (AMBER if proy >= 70 else ROSE)
         k[4].markdown(kartu_kpi(
@@ -1416,7 +1441,8 @@ def main():
 
         a, b = st.columns([1, 1.4])
         with a:
-            judul("Status Pencapaian", f"On Track = minimal {ratio * 100:.0f}% target")
+            judul("Status Pencapaian",
+                  f"Sesuai Jadwal = sudah mencapai minimal {ratio * 100:.0f}% target bulanan")
             st.plotly_chart(g_donat_status(rekap), width="stretch")
         with b:
             judul("Status per Divisi", "Komposisi karyawan di tiap divisi")
@@ -1427,12 +1453,12 @@ def main():
         if belum or tert:
             st.markdown(
                 f'<div class="note warn"><b>Perlu tindak lanjut.</b> {belum} karyawan '
-                f'belum submit sama sekali dan {tert} tertinggal dari pace ideal. '
+                f'belum submit sama sekali dan {tert} tertinggal dari jadwal. '
                 f'Sisa {sisa_hari} hari di periode ini — daftar lengkap ada di tab '
                 f'<b>Tindak Lanjut</b>.</div>', unsafe_allow_html=True)
         else:
             st.markdown(
-                '<div class="note ok"><b>Semua karyawan on track atau sudah mencapai '
+                '<div class="note ok"><b>Semua karyawan sesuai jadwal atau sudah mencapai '
                 'target.</b> Tidak ada yang perlu di-follow-up periode ini.</div>',
                 unsafe_allow_html=True)
 
