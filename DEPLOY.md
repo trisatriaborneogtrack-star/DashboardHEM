@@ -56,9 +56,17 @@ Buat repo-nya di GitHub sebagai **Private** (app-nya tetap bisa dijadikan public
 Cek sebelum push:
 
 ```bash
-git status --porcelain          # pastikan tidak ada .xlsx / .json ikut
-git ls-files | grep -Ei '\.(xlsx|csv|json)$'   # harus kosong
+git status --porcelain                          # tidak boleh ada .xlsx / .json
+git ls-files | grep -Ei '\.(xlsx|csv|json)$'    # harus kosong
+git ls-files .streamlit                         # HARUS memuat .streamlit/config.toml
 ```
+
+> **Folder `.streamlit` gampang terlewat.** Namanya diawali titik, jadi sering tidak
+> ikut kalau file di-drag lewat antarmuka web GitHub, dan sebagian file manager
+> menyembunyikannya. Kalau `config.toml` tidak ter-deploy, Streamlit memakai tema
+> bawaan — tanda paling kentara: warna aktif pada pills/tombol jadi **merah
+> `#FF4B4B`**, bukan indigo. Perintah `git ls-files .streamlit` di atas memastikan
+> file itu benar-benar terlacak.
 
 ---
 

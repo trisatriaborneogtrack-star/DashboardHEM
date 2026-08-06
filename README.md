@@ -77,12 +77,14 @@ memakai nilai *Target default* di sidebar (default 7 km, mengikuti Walking).
 
 ## Tata letak
 
-**Tanpa sidebar.** Semua kontrol ada di halaman utama:
+**Tanpa sidebar dan tanpa filter.** Seluruh karyawan selalu ditampilkan, supaya
+angka partisipasi dan daftar "belum mulai" tidak pernah menyembunyikan siapa pun.
+Kontrol yang tersisa:
 
-- Baris filter di atas: **Periode** (dropdown), **Entitas** (segmented control),
-  **Divisi** (pills), tombol **Muat ulang**
-- Expander **⚙️ Pengaturan lanjutan**: target default, jumlah peserta di leaderboard,
-  info sumber data, tombol keluar
+- **Periode** — hanya muncul sebagai dropdown kalau sheet memuat lebih dari satu
+  bulan; kalau cuma satu, ditampilkan sebagai label
+- Tombol **🔄 Muat ulang**
+- Expander **⚙️ Pengaturan lanjutan**: target default, info sumber data, tombol keluar
 
 Di bawahnya: hero dengan progress bar periode → 5 kartu KPI → kartu insight otomatis
 → 5 tab.
@@ -95,10 +97,13 @@ bulan** (ekstrapolasi linear dari pace saat ini).
 **Kartu insight otomatis:** divisi terdepan, peserta paling konsisten, hari paling
 aktif dalam seminggu, dan jumlah karyawan yang belum mulai.
 
+Perbandingan antar-entitas dan antar-divisi tetap tersedia di tab **Breakdown** —
+sebagai informasi, bukan sebagai filter yang menyembunyikan data.
+
 | Tab | Isi |
 |---|---|
 | **Ringkasan** | Podium 3 besar, donat status, status per divisi, sebaran pencapaian per rentang target, kontribusi per jenis aktivitas |
-| **Leaderboard** | Peringkat visual + tabel dengan pencarian nama dan progress bar |
+| **Status Karyawan** | Grafik 15 peserta teraktif + tabel **seluruh karyawan** (termasuk yang belum submit), dengan pencarian nama, progress bar, dan unduh CSV |
 | **Tren & Pola** | Jarak harian + kumulatif vs pace ideal, pola hari dalam seminggu, distribusi jam submit, heatmap konsistensi |
 | **Breakdown** | Agregasi per divisi dan per entitas |
 | **Tindak Lanjut** | Daftar follow-up berisi sisa KM dan **KM/hari yang dibutuhkan**, panel verifikasi data, log aktivitas dengan link Strava, unduh CSV |
@@ -108,6 +113,19 @@ aktif dalam seminggu, dan jumlah karyawan yang belum mulai.
 Dijalankan otomatis tiap periode, menandai: submit ganda di tanggal yang sama,
 tanggal aktivitas di luar bulan target, jarak outlier (di atas Q3 + 3×IQR), dan
 entri tanpa link screenshot. Berguna untuk dicek sebelum rekap bulanan dikunci.
+
+## Catatan pengembangan
+
+- **Jangan pakai ekspresi telanjang.** `st.plotly_chart(f) if f else st.info(...)`
+  ditangkap Streamlit magic, dan objek `DeltaGenerator` hasil kembaliannya dirender
+  sebagai dokumentasi API ribuan baris di halaman. Pakai `tampil_grafik(fig, pesan)`.
+  `[runner] magicEnabled = false` di `config.toml` jadi jaring pengaman kedua, dan
+  `test/cek_magic.py` memeriksanya secara statis.
+- **Warna cerah hanya untuk isian grafik.** Untuk teks, pakai varian `*_T`
+  (`AMBER_T`, `EMERALD_T`, dst). Versi cerahnya berkontras 2–3:1 di latar putih —
+  praktis tidak terbaca. Lihat `test/audit_kontras.py`.
+- **Setiap panel dibungkus `aman()`** sehingga satu kegagalan tidak menghentikan
+  seluruh halaman, dan traceback-nya tampil di tempat.
 
 ## Gerbang akses
 

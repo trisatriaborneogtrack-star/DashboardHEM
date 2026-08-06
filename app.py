@@ -84,6 +84,8 @@ STATUS_EMOJI = {
     "Tercapai": "🏆", "On Track": "🚀", "Tertinggal": "⚡", "Belum Mulai": "💤",
 }
 
+TOP_GRAFIK = 15  # jumlah batang di grafik peringkat (tabel tetap memuat semua)
+
 HARI_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 
 BULAN_ID = {
@@ -143,13 +145,32 @@ CSS = """
   .stTextInput input::placeholder { color: #8A91B4 !important; }
   div[data-baseweb="popover"] li { color: #181B2E !important; }
 
-  /* pills & segmented control */
-  div[data-testid="stPills"] button, div[data-testid="stSegmentedControl"] button {
-      color: #3B4168 !important; background: #fff !important; border-color: #DDE1F2 !important;
-      font-weight: 600; }
+  /* pills & segmented control.
+     Selektor sengaja dibuat berlapis: nama data-testid Streamlit berubah antar versi,
+     dan kalau .streamlit/config.toml tidak ikut ter-deploy, warna primer jatuh ke
+     merah bawaan (#FF4B4B) sehingga pilihan aktif terlihat merah muda. */
+  div[data-testid="stPills"] button,
+  div[data-testid="stSegmentedControl"] button,
+  button[data-testid="stBaseButton-pills"],
+  button[data-testid="stBaseButton-segmented_control"] {
+      color: #3B4168 !important; background: #fff !important;
+      border: 1px solid #DDE1F2 !important; font-weight: 600 !important; }
   div[data-testid="stPills"] button[aria-checked="true"],
-  div[data-testid="stSegmentedControl"] button[aria-checked="true"] {
-      background: #4F46E5 !important; color: #fff !important; border-color: #4F46E5 !important; }
+  div[data-testid="stSegmentedControl"] button[aria-checked="true"],
+  div[data-testid="stPills"] button[aria-selected="true"],
+  div[data-testid="stSegmentedControl"] button[aria-selected="true"],
+  button[data-testid="stBaseButton-pillsActive"],
+  button[data-testid="stBaseButton-segmented_controlActive"] {
+      background: #4338CA !important; color: #fff !important;
+      border-color: #4338CA !important; }
+  div[data-testid="stPills"] button[aria-checked="true"] *,
+  div[data-testid="stSegmentedControl"] button[aria-checked="true"] *,
+  button[data-testid="stBaseButtonPillsActive"] * { color: #fff !important; }
+
+  /* Warna primer merah bawaan Streamlit pada kontrol lain */
+  .stSlider [data-baseweb="slider"] div[role="slider"] { background: #4338CA !important; }
+  .stButton button[kind="primary"], .stFormSubmitButton button {
+      background: #4338CA !important; border-color: #4338CA !important; }
 
   /* ---------- hero ---------- */
   .hero { background: linear-gradient(115deg,#4338CA 0%,#6D28D9 45%,#BE185D 100%);
@@ -177,11 +198,12 @@ CSS = """
          position:relative; overflow:hidden; transition:transform .16s ease, box-shadow .16s ease; }
   .kpi:hover { transform:translateY(-3px); box-shadow:0 12px 26px -14px rgba(24,27,46,.3); }
   .kpi .cap { position:absolute; inset:0 0 auto 0; height:4px; }
-  .kpi .row { display:flex; align-items:center; gap:.5rem; margin:.25rem 0 .55rem 0; }
+  .kpi .row { display:flex; align-items:center; gap:.5rem; margin:.25rem 0 .55rem 0;
+              min-height:34px; }
   .kpi .ico { width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
               font-size:.95rem; flex:none; }
   .kpi .lbl { font-size:.7rem; font-weight:700; color:#4A5178; text-transform:uppercase;
-              letter-spacing:.06em; }
+              letter-spacing:.05em; line-height:1.25; }
   .kpi .val { font-size:1.9rem; font-weight:800; color:#181B2E; line-height:1;
               letter-spacing:-.035em; }
   .kpi .val small { font-size:.85rem; font-weight:700; color:#5A6288; margin-left:.15rem;
@@ -757,21 +779,27 @@ def kartu_podium(medali: str, nama: str, km: float, sub: str, warna: str) -> str
 
 
 def rapikan(fig, tinggi: int = 340, legend: bool = True):
+    # Ruang atas harus cukup untuk legenda; kalau tidak, legenda menimpa area plot.
     fig.update_layout(
         height=tinggi,
-        margin=dict(l=8, r=8, t=26, b=8),
+        margin=dict(l=10, r=26, t=52 if legend else 26, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="Plus Jakarta Sans, system-ui, sans-serif", size=12, color=INK),
         hoverlabel=dict(bgcolor="white", font_size=12, bordercolor=GRID,
                         font_family="Plus Jakarta Sans"),
         showlegend=legend,
-        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
-                    title_text="", font=dict(size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    title_text="", font=dict(size=11, color=INK)),
     )
-    fig.update_xaxes(showgrid=False, linecolor=GRID, tickfont=dict(color=MUTED, size=11))
+    # automargin: tanpa ini, nama divisi/peserta yang panjang terpotong di kiri
+    # karena margin sudah dipatok manual.
+    fig.update_xaxes(showgrid=False, linecolor=GRID, automargin=True,
+                     tickfont=dict(color=MUTED, size=11),
+                     title_font=dict(color=MUTED, size=11))
     fig.update_yaxes(gridcolor=GRID, zeroline=False, linecolor="rgba(0,0,0,0)",
-                     tickfont=dict(color=MUTED, size=11))
+                     automargin=True, tickfont=dict(color=MUTED, size=11),
+                     title_font=dict(color=MUTED, size=11))
     return fig
 
 
@@ -796,6 +824,20 @@ def judul(teks: str, sub: str = ""):
     st.markdown(f'<div class="sec">{teks}</div>', unsafe_allow_html=True)
     if sub:
         st.markdown(f'<div class="sec-sub">{sub}</div>', unsafe_allow_html=True)
+
+
+def tampil_grafik(fig, kosong: str = "Belum ada aktivitas pada periode ini."):
+    """Render grafik, atau pesan kalau datanya kosong.
+
+    JANGAN pakai bentuk `st.plotly_chart(f) if f else st.info(...)`. Ekspresi
+    telanjang seperti itu ditangkap oleh Streamlit magic, yang lalu menampilkan
+    objek DeltaGenerator hasil kembaliannya sebagai dokumentasi API — muncul
+    sebagai blok teks raksasa di halaman.
+    """
+    if fig is None:
+        st.info(kosong)
+        return
+    st.plotly_chart(fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -1119,45 +1161,42 @@ def main():
         st.error("Tidak ada periode yang bisa dibaca dari sheet.", icon="⚠️")
         return
 
-    # ---------------- filter di halaman utama ----------------
-    f1, f2, f3 = st.columns([1.5, 2.6, 1.1])
-    with f1:
-        pilih = st.selectbox("Periode", periodes["Periode Label"].tolist(), index=0)
+    # ---------------- pemilih periode ----------------
+    # Tidak ada filter entitas/divisi: seluruh karyawan selalu ditampilkan supaya
+    # angka partisipasi dan daftar "belum mulai" tidak pernah menyembunyikan siapa pun.
+    b1, b2 = st.columns([2.4, 1.1])
+    with b1:
+        if len(periodes) > 1:
+            pilih = st.selectbox("Periode", periodes["Periode Label"].tolist(), index=0)
+        else:
+            pilih = periodes["Periode Label"].iloc[0]
+            st.markdown(
+                f'<div class="sec-sub" style="margin:.35rem 0 0 0">Periode aktif '
+                f'<b style="color:{INK}">{pilih}</b></div>', unsafe_allow_html=True)
     periode = periodes.loc[periodes["Periode Label"] == pilih, "Periode"].iloc[0]
     berjalan, total_hari, start, end = periode_progress(periode)
     ratio = berjalan / total_hari if total_hari else 0.0
     sisa_hari = max(total_hari - berjalan, 0)
 
-    ent_opsi = sorted(roster_all["Entitas"].unique())
-    with f2:
-        ent = st.segmented_control("Entitas", ent_opsi, default=ent_opsi,
-                                   selection_mode="multi") or ent_opsi
-    with f3:
-        st.markdown('<div style="height:1.72rem"></div>', unsafe_allow_html=True)
+    with b2:
+        st.markdown('<div style="height:.35rem"></div>', unsafe_allow_html=True)
         if st.button("🔄 Muat ulang", width="stretch"):
             st.cache_data.clear()
             st.rerun()
 
-    div_opsi = sorted(roster_all["Divisi"].unique())
-    div = st.pills("Divisi", div_opsi, default=div_opsi,
-                   selection_mode="multi") or div_opsi
-
     with st.expander("⚙️ Pengaturan lanjutan"):
-        c1, c2 = st.columns(2)
-        target_default = c1.number_input(
+        target_default = st.number_input(
             "Target default untuk yang belum submit (km)", 1.0, 100.0, 7.0, 1.0,
             help="Dipakai karena kategori peserta belum diketahui sebelum submit pertama.")
-        top_n = c2.slider("Jumlah peserta di leaderboard", 5, 40, 15)
         st.caption(f"Sumber data: Google Sheet via {mode} · cache 5 menit. "
-                   f"Ambang On Track: {ratio * 100:.0f}% dari target bulanan.")
+                   f"Ambang On Track: {ratio * 100:.0f}% dari target bulanan. "
+                   f"Seluruh {len(roster_all)} karyawan ditampilkan tanpa filter.")
         if _secret("auth.password") and st.button("Keluar"):
             st.session_state.pop("_akses_ok", None)
             st.rerun()
 
-    roster = roster_all[roster_all["Entitas"].isin(ent)
-                        & roster_all["Divisi"].isin(div)].copy()
-    resp = resp_all[(resp_all["Periode"] == periode)
-                    & resp_all["Peserta"].isin(set(roster["Peserta"]))].copy()
+    roster = roster_all.copy()
+    resp = resp_all[resp_all["Periode"] == periode].copy()
     rekap = build_rekap(resp, roster, ratio, target_default)
 
     # ---------------- hero ----------------
@@ -1217,7 +1256,7 @@ def main():
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
     t1, t2, t3, t4, t5 = st.tabs(
-        ["Ringkasan", "Leaderboard", "Tren & Pola", "Breakdown", "Tindak Lanjut"])
+        ["Ringkasan", "Status Karyawan", "Tren & Pola", "Breakdown", "Tindak Lanjut"])
 
     # ---------------- ringkasan ----------------
     with t1, aman("Ringkasan"):
@@ -1259,38 +1298,48 @@ def main():
         a, b = st.columns(2)
         with a:
             judul("Sebaran Pencapaian", "Berapa banyak peserta di tiap rentang target")
-            f = g_sebaran(rekap)
-            st.plotly_chart(f, width="stretch") if f else st.info("Belum ada aktivitas.")
+            tampil_grafik(g_sebaran(rekap))
         with b:
             judul("Kontribusi per Jenis Aktivitas")
-            f = g_jenis(rekap)
-            st.plotly_chart(f, width="stretch") if f else st.info("Belum ada aktivitas.")
+            tampil_grafik(g_jenis(rekap))
 
-    # ---------------- leaderboard ----------------
-    with t2, aman("Leaderboard"):
-        judul("Peringkat Peserta",
-              f"Top {top_n} berdasarkan jarak · warna batang = persentase target")
-        f = g_leaderboard(rekap, top_n)
-        st.plotly_chart(f, width="stretch") if f else st.info(
-            "Belum ada peserta yang submit pada periode ini.")
+    # ---------------- peringkat & status seluruh karyawan ----------------
+    with t2, aman("Status Karyawan"):
+        judul("Peringkat Peserta Teraktif",
+              "Warna batang = persentase pencapaian target")
+        tampil_grafik(g_leaderboard(rekap, TOP_GRAFIK),
+                      "Belum ada peserta yang submit pada periode ini.")
 
+        judul("Status Seluruh Karyawan",
+              f"Semua {len(rekap)} karyawan, termasuk yang belum submit")
         cari = st.text_input("Cari nama", placeholder="Ketik nama karyawan…",
                              label_visibility="collapsed")
-        board = rekap[rekap["Aktual KM"] > 0].copy()
+
+        board = rekap.sort_values(
+            ["Aktual KM", "Nama"], ascending=[False, True]).copy()
         board.insert(0, "#", range(1, len(board) + 1))
         if cari.strip():
             board = board[board["Nama"].str.contains(cari.strip(), case=False, na=False)]
+            if board.empty:
+                st.info(f"Tidak ada karyawan dengan nama mengandung '{cari.strip()}'.")
+
+        board["Status"] = [f"{STATUS_EMOJI[s]} {s}" for s in board["Status"]]
         st.dataframe(
-            board[["#", "Nama", "Entitas", "Divisi", "Jenis", "Aktual KM", "Target KM",
-                   "Pencapaian %", "Total Aktivitas", "Hari Aktif", "Aktivitas Terjauh",
-                   "Status"]],
-            hide_index=True, width="stretch",
+            board[["#", "Nama", "Entitas", "Jabatan", "Divisi", "Jenis", "Aktual KM",
+                   "Target KM", "Pencapaian %", "Total Aktivitas", "Hari Aktif",
+                   "Aktivitas Terakhir", "Status"]],
+            hide_index=True, width="stretch", height=560,
             column_config={
                 "Aktual KM": st.column_config.NumberColumn(format="%.2f km"),
                 "Target KM": st.column_config.NumberColumn(format="%.0f km"),
-                "Aktivitas Terjauh": st.column_config.NumberColumn(format="%.2f km"),
+                "Aktivitas Terakhir": st.column_config.DateColumn(format="DD MMM YYYY"),
                 "Pencapaian %": st.column_config.ProgressColumn(
                     "Pencapaian", format="%.0f%%", min_value=0, max_value=100)})
+
+        st.download_button(
+            "⬇️ Unduh status seluruh karyawan (CSV)",
+            rekap.to_csv(index=False).encode("utf-8"),
+            file_name=f"status_karyawan_{pilih.replace(' ', '_')}.csv", mime="text/csv")
 
     # ---------------- tren ----------------
     with t3, aman("Tren & Pola"):
@@ -1316,20 +1365,15 @@ def main():
             a, b = st.columns(2)
             with a:
                 judul("Pola Hari dalam Seminggu", "Kapan karyawan paling banyak bergerak")
-                f = g_hari(resp)
-                if f:
-                    st.plotly_chart(f, width="stretch")
+                tampil_grafik(g_hari(resp))
             with b:
                 judul("Jam Submit", "Distribusi waktu pengisian form")
-                f = g_jam(resp)
-                st.plotly_chart(f, width="stretch") if f else st.info(
-                    "Kolom Timestamp tidak tersedia.")
+                tampil_grafik(g_jam(resp), "Kolom Timestamp tidak tersedia.")
 
             judul("Konsistensi Peserta",
                   f"Jarak harian · top {min(20, resp['Nama'].nunique())} peserta")
             f = g_heatmap(resp, start, end)
-            if f:
-                st.plotly_chart(f, width="stretch")
+            tampil_grafik(f)
 
     # ---------------- breakdown ----------------
     with t4, aman("Breakdown"):
@@ -1423,15 +1467,10 @@ def main():
                 COL_BUKTI: st.column_config.LinkColumn("Bukti Strava",
                                                        display_text="Buka")})
 
-        d1, d2 = st.columns(2)
-        d1.download_button("⬇️ Unduh rekap per karyawan (CSV)",
-                           rekap.to_csv(index=False).encode("utf-8"),
-                           file_name=f"rekap_{pilih.replace(' ', '_')}.csv",
-                           mime="text/csv", width="stretch")
-        d2.download_button("⬇️ Unduh log aktivitas (CSV)",
+        st.download_button("⬇️ Unduh log aktivitas (CSV)",
                            detail.to_csv(index=False).encode("utf-8"),
                            file_name=f"log_{pilih.replace(' ', '_')}.csv",
-                           mime="text/csv", width="stretch")
+                           mime="text/csv")
 
 
 if __name__ == "__main__":
