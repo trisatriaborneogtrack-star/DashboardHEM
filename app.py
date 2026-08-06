@@ -14,6 +14,8 @@ Jalankan:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import re
 import traceback
@@ -348,6 +350,26 @@ def parse_bulan(raw) -> pd.Timestamp:
     return pd.Timestamp(year=ts.year, month=ts.month, day=1) if pd.notna(ts) else pd.NaT
 
 
+def coerce_number(s: pd.Series) -> pd.Series:
+    """Ubah kolom jadi angka, termasuk format desimal Indonesia.
+
+    Sheet berlokal Indonesia mengeluarkan '20,75' (koma desimal) dan '1.234,5'
+    (titik ribuan). pd.to_numeric biasa akan mengembalikan NaN untuk keduanya,
+    sehingga barisnya terbuang diam-diam.
+    """
+    lugas = pd.to_numeric(s, errors="coerce")
+    non_null = int((s.notna() & (s.astype("string").str.strip() != "")).sum())
+    if non_null == 0 or int(lugas.notna().sum()) >= non_null * 0.9:
+        return lugas
+
+    teks = (s.astype("string").str.strip()
+            .str.replace(r"[^\d,.\-]", "", regex=True)
+            .str.replace(".", "", regex=False)      # titik = pemisah ribuan
+            .str.replace(",", ".", regex=False))    # koma = pemisah desimal
+    gaya_id = pd.to_numeric(teks, errors="coerce")
+    return gaya_id if int(gaya_id.notna().sum()) > int(lugas.notna().sum()) else lugas
+
+
 def coerce_datetime(s: pd.Series, dayfirst: bool = True) -> pd.Series:
     """Ubah kolom tanggal jadi datetime, apa pun bentuk aslinya.
 
@@ -437,7 +459,7 @@ def _normalize(resp_raw: pd.DataFrame, roster_raw: pd.DataFrame | None):
     if COL_BUKTI not in df.columns:
         df[COL_BUKTI] = ""
 
-    df[COL_KM] = pd.to_numeric(df[COL_KM], errors="coerce")
+    df[COL_KM] = coerce_number(df[COL_KM])
     df[COL_NAMA] = df[COL_NAMA].map(_clean)
     df = df[df[COL_NAMA] != ""].copy()
     df = df.dropna(subset=[COL_KM])
@@ -488,34 +510,41 @@ def load_excel(content: bytes):
     return _normalize(resp, roster)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_gsheet_csv(sheet_id: str, gid_resp: str, nama_roster: str | None,
-                    gid_roster: str | None = None):
-    """Baca lewat endpoint publik. Sheet harus di-share 'Anyone with the link'.
+def _baca_tab(sheet_id: str, nama: str | None, gid: str | None):
+    """Ambil satu tab lewat NAMA (gviz), dengan gid sebagai cadangan.
 
-    Tab master diambil lewat endpoint gviz yang menerima NAMA tab, sehingga
-    gid-nya tidak perlu dicari manual — inilah yang dulu membuat roster tidak
-    pernah terambil dan jumlah karyawan hanya sebanyak yang sudah submit.
+    Nama tab dipakai lebih dulu karena gid bisa basi: kalau Google Form
+    di-relink, tab jawaban dibuat ulang dan mendapat gid baru. Permintaan ke gid
+    lama lalu dialihkan diam-diam ke tab lain — dashboard tampak jalan padahal
+    membaca tabel yang salah.
     """
-    ekspor = "https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
     gviz = ("https://docs.google.com/spreadsheets/d/{sid}"
-            "/gviz/tq?tqx=out:csv&sheet={nama}")
+            "/gviz/tq?tqx=out:csv&headers=1&sheet={nama}")
+    ekspor = "https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
 
-    resp = pd.read_csv(ekspor.format(sid=sheet_id, gid=gid_resp))
+    if nama:
+        try:
+            return pd.read_csv(gviz.format(sid=sheet_id, nama=quote(nama, safe="")))
+        except Exception:  # noqa: BLE001
+            pass
+    if gid:
+        try:
+            return pd.read_csv(ekspor.format(sid=sheet_id, gid=gid))
+        except Exception:  # noqa: BLE001
+            pass
+    return None
 
-    roster = None
-    if gid_roster:
-        try:
-            roster = pd.read_csv(ekspor.format(sid=sheet_id, gid=gid_roster))
-        except Exception:  # noqa: BLE001
-            roster = None
-    if roster is None and nama_roster:
-        try:
-            roster = pd.read_csv(gviz.format(sid=sheet_id,
-                                             nama=quote(nama_roster, safe="")))
-        except Exception:  # noqa: BLE001
-            roster = None
-    return _normalize(resp, roster)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_gsheet_csv(sheet_id: str, nama_resp: str, nama_roster: str | None,
+                    gid_resp: str | None = None, gid_roster: str | None = None):
+    """Baca lewat endpoint publik. Sheet harus di-share 'Anyone with the link'."""
+    resp = _baca_tab(sheet_id, nama_resp, gid_resp)
+    if resp is None:
+        raise ValueError(
+            f"Tab '{nama_resp}' tidak bisa dibaca. Pastikan Google Sheet sudah "
+            f"di-share 'Anyone with the link -> Viewer' dan nama tabnya sama persis.")
+    return _normalize(resp, _baca_tab(sheet_id, nama_roster, gid_roster))
 
 
 def _ws_to_df(ws) -> pd.DataFrame:
@@ -536,6 +565,67 @@ def _ws_to_df(ws) -> pd.DataFrame:
     return df.loc[:, [c for c in df.columns if c]]
 
 
+# Dipakai hanya untuk memeriksa field non-kunci; private_key diperiksa dengan
+# menguji keabsahan base64-nya, jauh lebih andal daripada daftar kata.
+PLACEHOLDER = ("SALIN_DARI_JSON", "SALIN_", "GANTI", "xxxxxxxx",
+               "nama-project-anda", "your-project")
+
+
+def rapikan_kredensial(creds) -> dict:
+    """Bersihkan kredensial service account sebelum diserahkan ke gspread.
+
+    Dua kesalahan paling sering saat menempel Secrets:
+      1. Placeholder dari secrets.toml.example belum diganti.
+      2. private_key disalin apa adanya dari JSON sehingga baris barunya masih
+         berupa dua karakter backslash-n, bukan baris baru sungguhan.
+    Keduanya muncul sebagai 'Unable to load PEM file' yang tidak menjelaskan apa pun.
+    """
+    d = {k: v for k, v in dict(creds).items()}
+
+    kunci = str(d.get("private_key", ""))
+    if not kunci.strip():
+        raise ValueError(
+            "private_key kosong di Secrets. Salin nilai private_key dari file JSON "
+            "service account.")
+
+    # Baris baru literal -> baris baru sungguhan
+    kunci = kunci.replace("\r\n", "\n").replace("\\n", "\n").strip().strip('"').strip("'")
+
+    if "-----BEGIN" not in kunci:
+        raise ValueError(
+            "private_key tidak berformat PEM — isinya harus diawali "
+            "'-----BEGIN PRIVATE KEY-----' dan diakhiri '-----END PRIVATE KEY-----'.")
+
+    # Isi di antara BEGIN/END wajib base64 yang sah. Cara ini menangkap semua
+    # bentuk teks contoh sekaligus, tanpa perlu mendaftar kata per kata.
+    isi = "".join(b for b in kunci.splitlines() if "-----" not in b).strip()
+    sah = bool(isi) and len(isi) >= 100
+    if sah:
+        try:
+            base64.b64decode(isi, validate=True)
+        except (binascii.Error, ValueError):
+            sah = False
+    if not sah:
+        raise ValueError(
+            "private_key di Secrets bukan kunci yang sah — kemungkinan besar teks "
+            "contoh belum diganti. Buka file JSON service account, salin nilai "
+            "private_key-nya seutuhnya (diawali -----BEGIN PRIVATE KEY----- dan "
+            "panjangnya puluhan baris), lalu tempel di App settings -> Secrets.")
+
+    if not kunci.endswith("\n"):
+        kunci += "\n"
+    d["private_key"] = kunci
+
+    for wajib in ("client_email", "token_uri"):
+        nilai = str(d.get(wajib, ""))
+        if not nilai.strip() or any(x in nilai for x in PLACEHOLDER):
+            raise ValueError(
+                f"'{wajib}' di Secrets masih kosong atau berisi teks contoh. "
+                f"Salin nilainya dari file JSON service account.")
+
+    return d
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_gsheet_sa(sheet_id: str, ws_resp: str, ws_roster: str | None, _creds: dict):
     """Baca lewat service account. Sheet tetap private, cukup di-share ke email SA."""
@@ -544,7 +634,7 @@ def load_gsheet_sa(sheet_id: str, ws_resp: str, ws_roster: str | None, _creds: d
             "Paket 'gspread' belum terpasang. Tambahkan gspread dan google-auth "
             "ke requirements.txt."
         )
-    gc = gspread.service_account_from_dict(dict(_creds))
+    gc = gspread.service_account_from_dict(rapikan_kredensial(_creds))
     sh = gc.open_by_key(sheet_id)
 
     resp = _ws_to_df(sh.worksheet(ws_resp))
@@ -1117,12 +1207,12 @@ def ambil_data():
         mode = "service account"
         sumber_resp = f"tab '{tab_resp}'"
     else:
-        gid_resp = str(_secret("gsheet.gid_responses", DEFAULT_GID_RESP))
         resp, roster, n_master = load_gsheet_csv(
-            sid, gid_resp, tab_roster,
+            sid, tab_resp, tab_roster,
+            str(_secret("gsheet.gid_responses", "") or "") or None,
             str(_secret("gsheet.gid_roster", "") or "") or None)
         mode = "endpoint publik"
-        sumber_resp = f"gid {gid_resp}"
+        sumber_resp = f"tab '{tab_resp}'"
 
     meta = {
         "mode": mode,
@@ -1151,11 +1241,39 @@ def main():
     except Exception as e:  # noqa: BLE001
         st.markdown(f'<div class="hero"><h1>{APP_TITLE}</h1><p>{APP_SUB}</p></div>',
                     unsafe_allow_html=True)
-        st.error(f"Gagal memuat Google Sheet: {e}", icon="⚠️")
-        st.info(
-            "Periksa **App settings → Secrets**: `[gsheet] sheet_id`, nama tab, dan "
-            "kredensial `[gcp_service_account]`. Kalau memakai CSV export, sheet harus "
-            "di-share *Anyone with the link → Viewer*.", icon="🔧")
+        pesan = str(e)
+        st.error(f"Gagal memuat Google Sheet: {pesan}", icon="⚠️")
+
+        if "PEM" in pesan or "private_key" in pesan or "InvalidData" in pesan:
+            st.info(
+                "**Masalahnya ada di `private_key`.** Buka file JSON service account, "
+                "salin nilai `private_key` seutuhnya, lalu di **App settings → "
+                "Secrets** tulis begini:\n\n"
+                "```toml\n"
+                "private_key = \"\"\"-----BEGIN PRIVATE KEY-----\n"
+                "MIIEvQIBADANBgkqhkiG9w0BAQ...   <- isi asli, banyak baris\n"
+                "-----END PRIVATE KEY-----\n"
+                "\"\"\"\n"
+                "```\n\n"
+                "Yang perlu diperhatikan: pakai tiga tanda kutip, setiap baris kunci "
+                "berdiri sendiri (bukan satu baris panjang berisi `\\n`), dan tidak "
+                "ada teks contoh yang tertinggal.", icon="🔑")
+        elif "SpreadsheetNotFound" in pesan or "PERMISSION" in pesan.upper():
+            st.info(
+                "Sheet tidak bisa diakses. Pastikan Google Sheet sudah di-**Share** ke "
+                "alamat `client_email` milik service account dengan akses *Viewer*, "
+                "dan `[gsheet] sheet_id` sudah benar.", icon="🔧")
+        elif "WorksheetNotFound" in pesan:
+            st.info(
+                "Nama tab tidak ditemukan. `worksheet_responses` dan "
+                "`worksheet_roster` harus sama persis dengan nama tab di Google "
+                "Sheet, termasuk spasi dan huruf besar-kecilnya.", icon="🔧")
+        else:
+            st.info(
+                "Periksa **App settings → Secrets**: `[gsheet] sheet_id`, nama tab, "
+                "dan kredensial `[gcp_service_account]`. Kalau memakai endpoint "
+                "publik, sheet harus di-share *Anyone with the link → Viewer*.",
+                icon="🔧")
         return
 
     periodes = (resp_all[["Periode", "Periode Label"]].dropna()

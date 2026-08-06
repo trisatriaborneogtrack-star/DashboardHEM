@@ -155,7 +155,7 @@ tautan sekali pakai yang dikirim ke email.
 | `WorksheetNotFound` | Nama tab di secrets tidak sama persis dengan di Google Sheet (case-sensitive, termasuk spasi) |
 | Opsi service account tidak muncul di sidebar | Secrets belum tersimpan, atau blok `[gcp_service_account]` salah nama |
 | `No module named 'gspread'` | `requirements.txt` belum ke-push — cek isinya lalu **Reboot app** |
-| Error parsing private key | `private_key` harus pakai triple-quote `"""` dan baris-barisnya utuh |
+| `Unable to load PEM file` / `Invalid symbol 95` | `private_key` masih berisi teks contoh, atau baris barunya masih berupa `\n` literal. Lihat bagian di bawah |
 | App "zzz / waking up" | Normal: app tidur setelah ~12 jam tanpa traffic, hidup lagi otomatis saat dibuka |
 | Data tidak berubah padahal sheet sudah update | Cache 5 menit — klik **🔄 Muat ulang** di baris filter |
 | Halaman cuma menampilkan error merah | Sheet tidak terbaca. Pesan error dan petunjuk perbaikannya ada di layar |
