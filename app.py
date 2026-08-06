@@ -5,7 +5,8 @@ Dashboard monitoring aktivitas olahraga karyawan (Walking / Running) berbasis
 submission Google Form + bukti Strava.
 
 Sumber data: Google Sheet (otomatis — service account kalau tersedia, kalau tidak
-lewat CSV export). Tidak ada sidebar: semua filter ada di halaman utama.
+lewat endpoint publik). Tanpa sidebar, tanpa filter, tanpa kata sandi: seluruh
+karyawan selalu ditampilkan.
 
 Jalankan:
     streamlit run app.py
@@ -13,13 +14,13 @@ Jalankan:
 
 from __future__ import annotations
 
-import hmac
 import io
 import re
 import traceback
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -463,15 +464,21 @@ def _normalize(resp_raw: pd.DataFrame, roster_raw: pd.DataFrame | None):
 
     # Roster: gabungan daftar master + semua peserta yang pernah submit
     names = set(df["Peserta"])
+    n_master = 0
     if roster_raw is not None:
         r = roster_raw.copy()
         r.columns = [_clean(c) for c in r.columns]
         if COL_NAMA in r.columns:
-            names |= {n for n in r[COL_NAMA].map(_clean) if n}
+            master = {n for n in r[COL_NAMA].map(_clean) if n}
+            n_master = len(master)
+            names |= master
 
     roster = pd.DataFrame([parse_employee(n) for n in sorted(names)])
     roster["Divisi"] = roster["Jabatan"].map(map_divisi)
-    return df.reset_index(drop=True), roster
+    # n_master = 0 berarti tab master tidak terbaca; jumlah karyawan lalu hanya
+    # sebanyak orang yang pernah submit, dan angka partisipasi jadi menyesatkan
+    # (selalu mendekati 100%).
+    return df.reset_index(drop=True), roster, n_master
 
 
 @st.cache_data(show_spinner=False)
@@ -482,15 +489,31 @@ def load_excel(content: bytes):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_gsheet_csv(sheet_id: str, gid_resp: str, gid_roster: str | None):
-    """Baca lewat endpoint CSV export. Sheet harus di-share 'Anyone with the link'."""
-    base = "https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
-    resp = pd.read_csv(base.format(sid=sheet_id, gid=gid_resp))
+def load_gsheet_csv(sheet_id: str, gid_resp: str, nama_roster: str | None,
+                    gid_roster: str | None = None):
+    """Baca lewat endpoint publik. Sheet harus di-share 'Anyone with the link'.
+
+    Tab master diambil lewat endpoint gviz yang menerima NAMA tab, sehingga
+    gid-nya tidak perlu dicari manual — inilah yang dulu membuat roster tidak
+    pernah terambil dan jumlah karyawan hanya sebanyak yang sudah submit.
+    """
+    ekspor = "https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
+    gviz = ("https://docs.google.com/spreadsheets/d/{sid}"
+            "/gviz/tq?tqx=out:csv&sheet={nama}")
+
+    resp = pd.read_csv(ekspor.format(sid=sheet_id, gid=gid_resp))
+
     roster = None
     if gid_roster:
         try:
-            roster = pd.read_csv(base.format(sid=sheet_id, gid=gid_roster))
-        except Exception:
+            roster = pd.read_csv(ekspor.format(sid=sheet_id, gid=gid_roster))
+        except Exception:  # noqa: BLE001
+            roster = None
+    if roster is None and nama_roster:
+        try:
+            roster = pd.read_csv(gviz.format(sid=sheet_id,
+                                             nama=quote(nama_roster, safe="")))
+        except Exception:  # noqa: BLE001
             roster = None
     return _normalize(resp, roster)
 
@@ -1083,52 +1106,35 @@ def _secret(path: str, default=None):
 
 
 def ambil_data():
-    """Baca Google Sheet: pakai service account kalau ada, kalau tidak CSV export."""
+    """Baca Google Sheet: pakai service account kalau ada, kalau tidak endpoint publik."""
     sid = str(_secret("gsheet.sheet_id", DEFAULT_SHEET_ID))
+    tab_resp = str(_secret("gsheet.worksheet_responses", DEFAULT_WS_RESP))
+    tab_roster = str(_secret("gsheet.worksheet_roster", DEFAULT_WS_ROSTER) or "") or None
+
     if HAS_GSPREAD and _secret("gcp_service_account") is not None:
-        return load_gsheet_sa(
-            sid,
-            str(_secret("gsheet.worksheet_responses", DEFAULT_WS_RESP)),
-            str(_secret("gsheet.worksheet_roster", DEFAULT_WS_ROSTER) or "") or None,
-            st.secrets["gcp_service_account"],
-        ), "service account"
-    return load_gsheet_csv(
-        sid,
-        str(_secret("gsheet.gid_responses", DEFAULT_GID_RESP)),
-        str(_secret("gsheet.gid_roster", "") or "") or None,
-    ), "CSV export"
+        resp, roster, n_master = load_gsheet_sa(
+            sid, tab_resp, tab_roster, st.secrets["gcp_service_account"])
+        mode = "service account"
+        sumber_resp = f"tab '{tab_resp}'"
+    else:
+        gid_resp = str(_secret("gsheet.gid_responses", DEFAULT_GID_RESP))
+        resp, roster, n_master = load_gsheet_csv(
+            sid, gid_resp, tab_roster,
+            str(_secret("gsheet.gid_roster", "") or "") or None)
+        mode = "endpoint publik"
+        sumber_resp = f"gid {gid_resp}"
 
-
-def gerbang_akses() -> bool:
-    """Halaman kata sandi bersama. Dilewati kalau [auth].password kosong."""
-    sandi = str(_secret("auth.password", "") or "")
-    if not sandi or st.session_state.get("_akses_ok"):
-        return True
-
-    _, mid, _ = st.columns([1, 1.15, 1])
-    with mid:
-        st.markdown(
-            f'<div style="margin-top:10vh"></div>'
-            f'<div class="hero"><h1>{APP_TITLE}</h1>'
-            f'<p>{APP_SUB}</p></div><div style="height:1.1rem"></div>',
-            unsafe_allow_html=True)
-        with st.form("login"):
-            masuk = st.text_input("Kata sandi", type="password",
-                                  label_visibility="collapsed",
-                                  placeholder="Masukkan kata sandi")
-            kirim = st.form_submit_button("Masuk", width="stretch", type="primary")
-        if kirim:
-            if hmac.compare_digest(masuk, sandi):
-                st.session_state["_akses_ok"] = True
-                st.session_state.pop("_gagal", None)
-                st.rerun()
-            else:
-                st.session_state["_gagal"] = st.session_state.get("_gagal", 0) + 1
-        if st.session_state.get("_gagal"):
-            st.error(f"Kata sandi salah. Percobaan ke-{st.session_state['_gagal']}.",
-                     icon="🔒")
-        st.caption("Hubungi HRGA / IT kalau belum punya akses.")
-    return False
+    meta = {
+        "mode": mode,
+        "sheet_id": sid,
+        "sumber_resp": sumber_resp,
+        "tab_roster": tab_roster or "(tidak diatur)",
+        "n_resp": len(resp),
+        "n_master": n_master,
+        "n_roster": len(roster),
+        "roster_ok": n_master > 0,
+    }
+    return resp, roster, meta
 
 
 # ---------------------------------------------------------------------------
@@ -1140,11 +1146,8 @@ def main():
                        initial_sidebar_state="collapsed")
     st.markdown(CSS, unsafe_allow_html=True)
 
-    if not gerbang_akses():
-        return
-
     try:
-        (resp_all, roster_all), mode = ambil_data()
+        resp_all, roster_all, meta = ambil_data()
     except Exception as e:  # noqa: BLE001
         st.markdown(f'<div class="hero"><h1>{APP_TITLE}</h1><p>{APP_SUB}</p></div>',
                     unsafe_allow_html=True)
@@ -1184,16 +1187,36 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
+    if not meta["roster_ok"]:
+        st.warning(
+            f"**Tab master karyawan tidak terbaca**, jadi jumlah karyawan dihitung "
+            f"hanya dari {meta['n_roster']} orang yang pernah submit — angka "
+            f"partisipasi karenanya selalu mendekati 100% dan tidak mencerminkan "
+            f"seluruh karyawan. Atur `[gsheet] worksheet_roster` (nama tab persis) "
+            f"di **App settings → Secrets**. Saat ini dicari: "
+            f"`{meta['tab_roster']}`.", icon="⚠️")
+
     with st.expander("⚙️ Pengaturan lanjutan"):
         target_default = st.number_input(
             "Target default untuk yang belum submit (km)", 1.0, 100.0, 7.0, 1.0,
             help="Dipakai karena kategori peserta belum diketahui sebelum submit pertama.")
-        st.caption(f"Sumber data: Google Sheet via {mode} · cache 5 menit. "
-                   f"Ambang On Track: {ratio * 100:.0f}% dari target bulanan. "
+        st.caption(f"Ambang On Track: {ratio * 100:.0f}% dari target bulanan. "
                    f"Seluruh {len(roster_all)} karyawan ditampilkan tanpa filter.")
-        if _secret("auth.password") and st.button("Keluar"):
-            st.session_state.pop("_akses_ok", None)
-            st.rerun()
+
+        st.markdown("**Diagnostik sumber data**")
+        st.dataframe(pd.DataFrame([
+            ("Metode baca", meta["mode"]),
+            ("Sheet ID", meta["sheet_id"]),
+            ("Tab responses", meta["sumber_resp"]),
+            ("Baris responses terbaca", f"{meta['n_resp']} baris"),
+            ("Tab master karyawan", meta["tab_roster"]),
+            ("Nama di tab master", f"{meta['n_master']} orang"
+                                   if meta["n_master"] else "GAGAL DIBACA"),
+            ("Total karyawan dipantau", f"{meta['n_roster']} orang"),
+        ], columns=["Item", "Nilai"]), hide_index=True, width="stretch")
+        st.caption("Cache 5 menit. Kalau angka di atas tidak sesuai isi Google Sheet, "
+                   "tekan **🔄 Muat ulang**.")
+
 
     roster = roster_all.copy()
     resp = resp_all[resp_all["Periode"] == periode].copy()

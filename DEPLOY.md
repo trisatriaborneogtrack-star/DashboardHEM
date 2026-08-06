@@ -4,14 +4,16 @@
 
 Dashboard ini menampilkan **nama karyawan, NIK, dan jabatan** — data pribadi.
 
-Setup yang dipakai di sini: **app PUBLIC + gerbang kata sandi**. Link bisa dibagikan
-bebas ke grup WhatsApp / email kantor tanpa perlu mendaftarkan email satu per satu,
-tapi datanya tetap tidak terbuka ke internet.
+Dashboard ini **tidak punya kata sandi**. Siapa pun yang bisa membuka URL-nya bisa
+melihat seluruh isinya, termasuk unduhan CSV yang memuat NIK.
 
-Kenapa kata sandinya wajib: opsi public di Streamlit bunyinya *"This app is public and
-**searchable**"* — jadi bukan cuma "yang punya link". App bisa terindeks mesin pencari
-dan muncul di galeri Streamlit. Tanpa gerbang, nama dan jabatan 66 karyawan terbuka ke
-siapa pun, dan tombol unduh CSV di tab Detail juga membawa NIK.
+Artinya pembatasan akses sepenuhnya bergantung pada pengaturan sharing Streamlit:
+
+- **App public** — opsi ini di Streamlit berbunyi *"This app is public and
+  **searchable**"*, jadi bukan sekadar "yang punya link": app bisa terindeks mesin
+  pencari dan muncul di galeri Streamlit.
+- **App private** — akses diberikan per email. Lebih repot saat menambah orang, tapi
+  data karyawan tidak terbuka ke internet. Lihat bagian 4 di bawah.
 
 Catatan lain:
 
@@ -19,9 +21,7 @@ Catatan lain:
   diturunkan dari repo, tapi bisa diubah dari App settings. Source code tidak ikut terbuka.
 - **Jangan pernah commit** file `.xlsx`/`.csv` data karyawan atau JSON service account.
   `.gitignore` di repo ini sudah memblokir keduanya.
-- Kalau suatu saat mau app benar-benar private (akses per-email, tanpa kata sandi),
-  cukup kosongkan blok `[auth]` di Secrets lalu set app jadi private. Community Cloud
-  hanya mengizinkan **satu private app** per akun.
+- Community Cloud hanya mengizinkan **satu private app** per akun.
 
 ---
 
@@ -102,9 +102,6 @@ Sheet tetap private. Yang dikasih akses cuma robot service account-nya.
    JSON tadi):
 
 ```toml
-[auth]
-password = "ganti-dengan-kata-sandi-kantor"
-
 [gsheet]
 sheet_id = "1I30t7uLOzwBMVyq0k-Rfy1NTzGUFLbT9v37XeFjKbF0"
 worksheet_responses = "Form Responses 1"
@@ -137,27 +134,17 @@ jatuh ke CSV export — dan sheet harus di-share *Anyone with the link → Viewe
 
 ---
 
-## 4. Jadikan app public
+## 4. Atur akses
 
-App → **Manage app → Settings → Sharing** → pilih **"This app is public and searchable"**.
+App → **Manage app → Settings → Sharing**.
 
-Setelah itu siapa pun yang membuka URL akan disambut halaman kata sandi lebih dulu.
-Bagikan URL + kata sandinya ke lingkungan kantor.
+**Kalau ingin cukup bagikan satu link** — pilih *"This app is public and searchable"*.
+Paling praktis, tapi datanya terbuka ke internet.
 
-**Pengelolaan kata sandi**
-
-- Ganti kapan saja dari **App settings → Secrets** (ubah `[auth] password` → Save).
-  App restart otomatis dan semua sesi lama ikut logout.
-- Ganti setiap ada karyawan resign atau kalau kata sandinya sudah tersebar terlalu luas.
-- Jangan pakai kata sandi yang sama dengan sistem kantor lain.
-- Kata sandi ini bersifat bersama — tidak ada jejak siapa yang membuka. Kalau butuh
-  audit per orang, pakai app private + daftar viewer per email.
-
-**Alternatif (akses per-email, tanpa kata sandi):** kosongkan `[auth]` di Secrets, set
-app jadi **private**, lalu tambahkan email tim HR/management ke daftar viewer satu per
-satu. Belum ada opsi allow-list per domain. Mereka login pakai Google atau magic link.
-
----
+**Kalau ingin dibatasi** — pilih *"Only specific people can view this app"*, lalu
+tambahkan email tim HR/management ke daftar penonton. Belum ada opsi allow-list
+per domain, jadi email dimasukkan satu per satu. Mereka masuk lewat Google atau
+tautan sekali pakai yang dikirim ke email.
 
 ## Kalau ada masalah
 
@@ -169,11 +156,11 @@ satu. Belum ada opsi allow-list per domain. Mereka login pakai Google atau magic
 | Opsi service account tidak muncul di sidebar | Secrets belum tersimpan, atau blok `[gcp_service_account]` salah nama |
 | `No module named 'gspread'` | `requirements.txt` belum ke-push — cek isinya lalu **Reboot app** |
 | Error parsing private key | `private_key` harus pakai triple-quote `"""` dan baris-barisnya utuh |
-| Halaman kata sandi tidak muncul | Blok `[auth]` belum ada di Secrets, atau `password` masih kosong |
-| Lupa kata sandi | Lihat / ubah di App settings → Secrets |
 | App "zzz / waking up" | Normal: app tidur setelah ~12 jam tanpa traffic, hidup lagi otomatis saat dibuka |
 | Data tidak berubah padahal sheet sudah update | Cache 5 menit — klik **🔄 Muat ulang** di baris filter |
 | Halaman cuma menampilkan error merah | Sheet tidak terbaca. Pesan error dan petunjuk perbaikannya ada di layar |
+| **Jumlah karyawan jauh lebih sedikit dari seharusnya** | Tab master tidak terbaca — dashboard menampilkan peringatan kuning. Buka **⚙️ Pengaturan lanjutan → Diagnostik sumber data** untuk melihat apa yang benar-benar terambil, lalu betulkan `[gsheet] worksheet_roster` agar sama persis dengan nama tab di Google Sheet |
+| Partisipasi selalu 100% | Gejala yang sama seperti di atas: roster hanya berisi orang yang sudah submit |
 | `MemoryError` / app restart | Limit ~1 GB. Untuk skala data ini seharusnya aman |
 
 **Update dashboard:** cukup `git push` — Community Cloud rebuild otomatis.
@@ -186,5 +173,5 @@ Kalau perubahan menyentuh `requirements.txt`, lakukan **Reboot app** dari menu M
 Kalau setup Google Cloud terasa berat, mode **"Google Sheet (link publik)"** juga
 dipakai otomatis kalau `[gcp_service_account]` tidak diisi — tapi sheet harus di-share
 *Anyone with the link → Viewer*. Artinya sheet
-mentahnya (berisi nama dan NIK) bisa dibuka siapa pun yang tahu Sheet ID, terlepas dari
-gerbang kata sandi di dashboard. Untuk data ini, service account jauh lebih aman.
+mentahnya (berisi nama dan NIK) bisa dibuka siapa pun yang tahu Sheet ID, terlepas
+dari pengaturan sharing dashboard. Untuk data ini, service account jauh lebih aman.

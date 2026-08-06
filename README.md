@@ -23,7 +23,14 @@ Data dibaca **langsung dari Google Sheet**, dipilih otomatis tanpa opsi di UI:
 2. Kalau tidak → **CSV export**. Sheet harus di-share *Anyone with the link → Viewer*.
 
 Sheet ID dan nama tab diatur lewat `[gsheet]` di secrets; kalau kosong, dipakai nilai
-default di `app.py`. Hasil dibaca dengan cache 5 menit — tombol **🔄 Muat ulang** di
+default di `app.py`. Pada mode endpoint publik, tab master diambil lewat endpoint
+`gviz` yang menerima **nama tab**, jadi gid-nya tidak perlu dicari manual.
+
+**Tab master menentukan angka partisipasi.** Kalau tab itu gagal dibaca, roster hanya
+berisi orang yang pernah submit — partisipasi jadi mendekati 100% dan karyawan yang
+belum bergerak tidak muncul sama sekali. Dashboard mendeteksi kondisi ini dan
+menampilkan peringatan; rinciannya ada di **⚙️ Pengaturan lanjutan → Diagnostik
+sumber data**. Hasil dibaca dengan cache 5 menit — tombol **🔄 Muat ulang** di
 baris filter memuat ulang paksa.
 
 Mode service account membaca tanggal sebagai serial number, jadi kebal terhadap
@@ -126,24 +133,16 @@ entri tanpa link screenshot. Berguna untuk dicek sebelum rekap bulanan dikunci.
   praktis tidak terbaca. Lihat `test/audit_kontras.py`.
 - **Setiap panel dibungkus `aman()`** sehingga satu kegagalan tidak menghentikan
   seluruh halaman, dan traceback-nya tampil di tempat.
-
-## Gerbang akses
-
-Kalau `[auth] password` diisi di `st.secrets`, app menampilkan halaman kata sandi lebih
-dulu. Kalau blok itu kosong atau tidak ada, app langsung terbuka — praktis untuk
-pemakaian lokal.
-
-Dipakai saat app di-deploy **public**: link cukup dibagikan ke lingkungan kantor tanpa
-mendaftarkan email satu per satu, tapi data karyawan tidak ikut terbuka ke internet.
-Tombol **Keluar** ada di bagian bawah sidebar.
+- **Tidak ada lapisan autentikasi di aplikasi.** Pembatasan akses sepenuhnya
+  mengandalkan pengaturan sharing Streamlit Community Cloud.
 
 ## Deploy
 
 Langkah lengkap ke Streamlit Community Cloud ada di **[DEPLOY.md](DEPLOY.md)**.
 
-> Dashboard ini memuat nama, NIK, dan jabatan karyawan. Kalau app di-set public,
-> **isi `[auth] password`** — opsi public di Streamlit berarti *public and searchable*,
-> bukan sekadar "yang punya link". Repo GitHub tetap bisa private.
+> Dashboard ini terbuka tanpa kata sandi. Kalau app di-set public di Streamlit,
+> isinya bisa dilihat siapa pun dan terindeks mesin pencari. Untuk membatasi akses,
+> set app jadi **private** dan daftarkan email penonton — lihat `DEPLOY.md`.
 
 Container mana pun juga bisa:
 
