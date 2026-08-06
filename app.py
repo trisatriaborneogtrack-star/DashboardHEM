@@ -1,19 +1,19 @@
 """
-Healthy Employee Movement Program — Ops Monitoring Dashboard
-============================================================
-Dashboard harian untuk monitoring program olahraga karyawan (Walking / Running)
-berbasis submission Google Form + Strava screenshot.
+Healthy Employee Movement Program — Dashboard
+=============================================
+Dashboard monitoring aktivitas olahraga karyawan (Walking / Running) berbasis
+submission Google Form + bukti Strava.
+
+Sumber data: Google Sheet (otomatis — service account kalau tersedia, kalau tidak
+lewat CSV export). Tidak ada sidebar: semua filter ada di halaman utama.
 
 Jalankan:
     streamlit run app.py
-
-Sumber data:
-    1. Upload file .xlsx hasil export Google Form (default)
-    2. Google Sheet CSV URL (sheet harus di-share "Anyone with the link")
 """
 
 from __future__ import annotations
 
+import hmac
 import io
 import re
 import unicodedata
@@ -24,40 +24,49 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-try:  # opsional — hanya dibutuhkan untuk mode service account
+try:  # opsional — dipakai kalau sheet dibaca via service account
     import gspread
 
     HAS_GSPREAD = True
 except ImportError:  # pragma: no cover
     HAS_GSPREAD = False
 
-# Epoch serial Google Sheets / Excel
 SHEETS_EPOCH = pd.Timestamp("1899-12-30")
 
 # ---------------------------------------------------------------------------
-# Konstanta & tema
+# Identitas & palet
 # ---------------------------------------------------------------------------
 
 APP_TITLE = "Healthy Employee Movement Program"
-APP_SUB = "Monitoring Harian Aktivitas Olahraga Karyawan"
+APP_SUB = "Monitoring aktivitas olahraga karyawan TPB & GTN"
 
 WITA = timezone(timedelta(hours=8))
 
-INK = "#0F172A"
-ACCENT = "#2563EB"
-SUCCESS = "#16A34A"
-WARN = "#F59E0B"
-DANGER = "#DC2626"
-MUTED = "#64748B"
-GRID = "#E2E8F0"
+INDIGO = "#5B5BD6"
+VIOLET = "#8B5CF6"
+CYAN = "#06B6D4"
+EMERALD = "#10B981"
+AMBER = "#F59E0B"
+ROSE = "#F43F5E"
+PINK = "#EC4899"
+INK = "#181B2E"
+MUTED = "#7A82A6"
+GRID = "#E8EAF6"
+
+PALETTE = [INDIGO, CYAN, EMERALD, AMBER, PINK, VIOLET, "#14B8A6", "#F97316"]
 
 STATUS_ORDER = ["Tercapai", "On Track", "Tertinggal", "Belum Mulai"]
 STATUS_COLOR = {
-    "Tercapai": SUCCESS,
-    "On Track": ACCENT,
-    "Tertinggal": WARN,
-    "Belum Mulai": DANGER,
+    "Tercapai": EMERALD,
+    "On Track": INDIGO,
+    "Tertinggal": AMBER,
+    "Belum Mulai": ROSE,
 }
+STATUS_EMOJI = {
+    "Tercapai": "🏆", "On Track": "🚀", "Tertinggal": "⚡", "Belum Mulai": "💤",
+}
+
+HARI_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 
 BULAN_ID = {
     "januari": 1, "februari": 2, "maret": 3, "april": 4,
@@ -68,6 +77,8 @@ BULAN_NAMA = {v: k.capitalize() for k, v in BULAN_ID.items()}
 
 DEFAULT_SHEET_ID = "1I30t7uLOzwBMVyq0k-Rfy1NTzGUFLbT9v37XeFjKbF0"
 DEFAULT_GID_RESP = "1186413594"
+DEFAULT_WS_RESP = "Form Responses 1"
+DEFAULT_WS_ROSTER = "Sheet1"
 
 COL_TS = "Timestamp"
 COL_NAMA = "Nama Karyawan"
@@ -79,43 +90,91 @@ COL_BUKTI = "Screenshot Aktivitas Strava"
 
 CSS = """
 <style>
-  .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1400px; }
-  #MainMenu, footer { visibility: hidden; }
+  @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
-  .hero { border-bottom: 1px solid #E2E8F0; padding-bottom: 1.1rem; margin-bottom: 1.6rem; }
-  .hero h1 { font-size: 1.85rem; font-weight: 700; color: #0F172A; margin: 0 0 .25rem 0;
-             letter-spacing: -.02em; line-height: 1.15; }
-  .hero p { color: #64748B; font-size: .95rem; margin: 0; }
-  .hero .pill { display:inline-block; background:#EFF6FF; color:#2563EB; font-size:.72rem;
-                font-weight:600; padding:.2rem .55rem; border-radius:999px; margin-left:.5rem;
-                vertical-align: middle; letter-spacing:.02em; }
+  html, body, [class*="css"], .stApp { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+  .stApp { background: #F5F6FC; }
+  .block-container { padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1480px; }
+  #MainMenu, footer, header { visibility: hidden; }
+  section[data-testid="stSidebar"], div[data-testid="collapsedControl"] { display: none !important; }
 
-  .kpi { background:#FFFFFF; border:1px solid #E2E8F0; border-radius:12px; padding:1rem 1.1rem;
-         height:100%; transition: border-color .15s ease; }
-  .kpi:hover { border-color:#CBD5E1; }
-  .kpi .lbl { font-size:.72rem; font-weight:600; color:#64748B; text-transform:uppercase;
-              letter-spacing:.06em; margin-bottom:.4rem; }
-  .kpi .val { font-size:1.85rem; font-weight:700; color:#0F172A; line-height:1.05;
-              letter-spacing:-.02em; }
-  .kpi .val small { font-size:.9rem; font-weight:600; color:#94A3B8; margin-left:.2rem; }
-  .kpi .sub { font-size:.78rem; color:#64748B; margin-top:.35rem; }
-  .kpi .bar { height:5px; background:#F1F5F9; border-radius:99px; margin-top:.65rem; overflow:hidden; }
+  /* ---------- hero ---------- */
+  .hero { background: linear-gradient(115deg,#4F46E5 0%,#7C3AED 42%,#DB2777 100%);
+          border-radius: 20px; padding: 1.5rem 1.8rem; color: #fff; position: relative;
+          overflow: hidden; box-shadow: 0 14px 34px -14px rgba(79,70,229,.55); }
+  .hero::after { content:""; position:absolute; right:-70px; top:-90px; width:290px; height:290px;
+                 border-radius:50%; background:rgba(255,255,255,.11); }
+  .hero::before { content:""; position:absolute; right:80px; bottom:-120px; width:210px; height:210px;
+                  border-radius:50%; background:rgba(255,255,255,.08); }
+  .hero h1 { font-size:1.72rem; font-weight:800; margin:0 0 .3rem 0; letter-spacing:-.03em;
+             line-height:1.12; position:relative; z-index:1; }
+  .hero p { margin:0; font-size:.9rem; color:rgba(255,255,255,.86); position:relative; z-index:1; }
+  .hero .tags { margin-top:.85rem; display:flex; gap:.45rem; flex-wrap:wrap;
+                position:relative; z-index:1; }
+  .hero .tag { background:rgba(255,255,255,.19); border:1px solid rgba(255,255,255,.26);
+               padding:.24rem .68rem; border-radius:999px; font-size:.74rem; font-weight:600;
+               backdrop-filter: blur(6px); }
+  .hero .track { margin-top:1rem; height:7px; background:rgba(255,255,255,.22);
+                 border-radius:99px; overflow:hidden; position:relative; z-index:1; }
+  .hero .track > div { height:100%; background:#fff; border-radius:99px; }
+
+  /* ---------- kartu KPI ---------- */
+  .kpi { background:#fff; border-radius:16px; padding:1rem 1.05rem; height:100%;
+         border:1px solid #EDEFF8; box-shadow:0 2px 10px -4px rgba(24,27,46,.09);
+         position:relative; overflow:hidden; transition:transform .16s ease, box-shadow .16s ease; }
+  .kpi:hover { transform:translateY(-3px); box-shadow:0 12px 26px -14px rgba(24,27,46,.3); }
+  .kpi .cap { position:absolute; inset:0 0 auto 0; height:4px; }
+  .kpi .row { display:flex; align-items:center; gap:.5rem; margin:.25rem 0 .55rem 0; }
+  .kpi .ico { width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
+              font-size:.95rem; flex:none; }
+  .kpi .lbl { font-size:.7rem; font-weight:700; color:#7A82A6; text-transform:uppercase;
+              letter-spacing:.07em; }
+  .kpi .val { font-size:1.92rem; font-weight:800; color:#181B2E; line-height:1;
+              letter-spacing:-.035em; }
+  .kpi .val small { font-size:.85rem; font-weight:700; color:#A6ADCB; margin-left:.15rem;
+                    letter-spacing:0; }
+  .kpi .sub { font-size:.76rem; color:#7A82A6; margin-top:.42rem; line-height:1.35; }
+  .kpi .bar { height:6px; background:#F1F2FA; border-radius:99px; margin-top:.6rem; overflow:hidden; }
   .kpi .bar > div { height:100%; border-radius:99px; }
 
-  .sec { font-size:1.02rem; font-weight:700; color:#0F172A; margin:.4rem 0 .1rem 0;
-         letter-spacing:-.01em; }
-  .sec-sub { font-size:.82rem; color:#64748B; margin-bottom:.7rem; }
+  /* ---------- kartu insight ---------- */
+  .ins { border-radius:14px; padding:.8rem .95rem; height:100%; border:1px solid transparent; }
+  .ins .t { font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.07em;
+            opacity:.78; margin-bottom:.28rem; }
+  .ins .v { font-size:.98rem; font-weight:700; line-height:1.25; }
+  .ins .d { font-size:.76rem; opacity:.8; margin-top:.2rem; line-height:1.35; }
 
-  .note { background:#F8FAFC; border-left:3px solid #2563EB; border-radius:0 8px 8px 0;
-          padding:.7rem .9rem; font-size:.84rem; color:#334155; margin:.4rem 0 1rem 0; }
-  .note.warn { border-left-color:#F59E0B; background:#FFFBEB; }
-  .note.ok   { border-left-color:#16A34A; background:#F0FDF4; }
+  /* ---------- podium ---------- */
+  .pod { background:#fff; border:1px solid #EDEFF8; border-radius:16px; padding:.95rem;
+         text-align:center; box-shadow:0 2px 10px -4px rgba(24,27,46,.09); height:100%; }
+  .pod .m { font-size:1.7rem; line-height:1; }
+  .pod .n { font-size:.88rem; font-weight:700; color:#181B2E; margin-top:.45rem;
+            line-height:1.25; }
+  .pod .k { font-size:1.32rem; font-weight:800; letter-spacing:-.03em; margin-top:.3rem; }
+  .pod .s { font-size:.72rem; color:#7A82A6; margin-top:.15rem; }
 
-  div[data-testid="stMetricValue"] { font-size:1.5rem; }
-  section[data-testid="stSidebar"] { border-right:1px solid #E2E8F0; }
-  section[data-testid="stSidebar"] .block-container { padding-top:1.5rem; }
-  .stTabs [data-baseweb="tab-list"] { gap:.3rem; border-bottom:1px solid #E2E8F0; }
-  .stTabs [data-baseweb="tab"] { font-weight:600; font-size:.88rem; padding:.5rem .9rem; }
+  /* ---------- umum ---------- */
+  .sec { font-size:1rem; font-weight:700; color:#181B2E; margin:.2rem 0 .1rem 0;
+         letter-spacing:-.015em; }
+  .sec-sub { font-size:.79rem; color:#7A82A6; margin-bottom:.6rem; }
+  .panel { background:#fff; border:1px solid #EDEFF8; border-radius:16px; padding:1rem 1.1rem;
+           box-shadow:0 2px 10px -4px rgba(24,27,46,.09); }
+  .note { border-radius:12px; padding:.75rem .95rem; font-size:.83rem; line-height:1.5;
+          margin:.3rem 0 .9rem 0; }
+  .note.warn { background:#FFF7ED; border:1px solid #FED7AA; color:#9A3412; }
+  .note.ok { background:#ECFDF5; border:1px solid #A7F3D0; color:#065F46; }
+
+  div[data-testid="stMetricValue"] { font-size:1.35rem; font-weight:800; color:#181B2E; }
+  .stTabs [data-baseweb="tab-list"] { gap:.25rem; background:#fff; padding:.3rem;
+      border-radius:13px; border:1px solid #EDEFF8; }
+  .stTabs [data-baseweb="tab-list"] button { border-radius:9px; font-weight:600;
+      font-size:.85rem; padding:.42rem .95rem; color:#7A82A6; }
+  .stTabs [aria-selected="true"] { background:linear-gradient(120deg,#4F46E5,#7C3AED) !important;
+      color:#fff !important; }
+  .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display:none; }
+  div[data-testid="stExpander"] { border:1px solid #EDEFF8; border-radius:13px;
+      background:#fff; }
+  .stDownloadButton button, .stButton button { border-radius:10px; font-weight:600; }
 </style>
 """
 
@@ -515,458 +574,637 @@ def find_anomali(resp: pd.DataFrame, periode: pd.Timestamp) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Komponen UI
+# Metrik turunan
 # ---------------------------------------------------------------------------
 
-def kpi_card(label: str, value: str, sub: str = "", pct: float | None = None,
-             color: str = ACCENT) -> str:
+def hitung_ringkasan(rekap: pd.DataFrame, ratio: float) -> dict:
+    """Semua angka KPI dikumpulkan di satu tempat supaya konsisten antar panel."""
+    n = len(rekap)
+    aktif = int((rekap["Aktual KM"] > 0).sum())
+    total_km = float(rekap["Aktual KM"].sum())
+    total_target = float(rekap["Target KM"].sum())
+    tercapai = int((rekap["Status"] == "Tercapai").sum())
+    pace_ideal = total_target * ratio
+    return {
+        "n": n,
+        "aktif": aktif,
+        "partisipasi": aktif / n * 100 if n else 0.0,
+        "total_km": total_km,
+        "total_target": total_target,
+        "progres_km": total_km / total_target * 100 if total_target else 0.0,
+        "tercapai": tercapai,
+        "pct_tercapai": tercapai / n * 100 if n else 0.0,
+        "pace_ideal": pace_ideal,
+        "pace_pct": total_km / pace_ideal * 100 if pace_ideal else 0.0,
+        "aktivitas": int(rekap["Total Aktivitas"].sum()),
+        "km_per_aktif": total_km / aktif if aktif else 0.0,
+        # Ekstrapolasi linear dari pace saat ini ke akhir bulan
+        "proyeksi": total_km / ratio if ratio > 0 else 0.0,
+    }
+
+
+def susun_insight(rekap: pd.DataFrame, resp: pd.DataFrame, r: dict,
+                  sisa_hari: int) -> list[dict]:
+    """Tiga sorotan otomatis yang paling relevan untuk periode berjalan."""
+    out = []
+
+    aktif = rekap[rekap["Aktual KM"] > 0]
+    if not aktif.empty:
+        div = (rekap.groupby("Divisi", observed=False)
+               .agg(a=("Aktual KM", lambda s: int((s > 0).sum())), n=("Peserta", "size"),
+                    km=("Aktual KM", "sum")))
+        div = div[div["n"] >= 2]
+        if not div.empty:
+            div["p"] = div["a"] / div["n"] * 100
+            top = div.sort_values(["p", "km"], ascending=False).iloc[0]
+            out.append({
+                "t": "Divisi terdepan", "v": str(div.sort_values(['p','km'], ascending=False).index[0]),
+                "d": f"{int(top['a'])} dari {int(top['n'])} orang aktif "
+                     f"({top['p']:.0f}%) · {top['km']:.0f} km",
+                "c": INDIGO,
+            })
+
+        konsisten = aktif.sort_values(["Hari Aktif", "Aktual KM"], ascending=False).iloc[0]
+        out.append({
+            "t": "Paling konsisten", "v": str(konsisten["Nama"]),
+            "d": f"{int(konsisten['Hari Aktif'])} hari aktif · "
+                 f"{konsisten['Aktual KM']:.1f} km · {konsisten['Pencapaian %']:.0f}% target",
+            "c": EMERALD,
+        })
+
+    if not resp.empty:
+        hari = resp.groupby(resp["Tanggal"].dt.dayofweek)[COL_KM].sum()
+        if not hari.empty:
+            fav = int(hari.idxmax())
+            out.append({
+                "t": "Hari paling aktif", "v": HARI_ID[fav],
+                "d": f"{hari.max():.0f} km terkumpul di hari {HARI_ID[fav]}",
+                "c": CYAN,
+            })
+
+    belum = int((rekap["Status"] == "Belum Mulai").sum())
+    if belum:
+        out.append({
+            "t": "Butuh dorongan", "v": f"{belum} karyawan belum mulai",
+            "d": f"Sisa {sisa_hari} hari untuk mengejar target periode ini",
+            "c": ROSE,
+        })
+
+    if r["pace_pct"] >= 100:
+        out.append({
+            "t": "Status program", "v": "Di atas pace ideal",
+            "d": f"Terkumpul {r['total_km']:.0f} km, {r['pace_pct'] - 100:.0f}% "
+                 f"di atas target hari ini",
+            "c": EMERALD,
+        })
+
+    return out[:4]
+
+
+# ---------------------------------------------------------------------------
+# Komponen tampilan
+# ---------------------------------------------------------------------------
+
+def kartu_kpi(label: str, nilai: str, sub: str, ikon: str, warna: str,
+              pct: float | None = None) -> str:
     bar = ""
     if pct is not None:
         w = max(0.0, min(100.0, float(pct)))
-        bar = f'<div class="bar"><div style="width:{w:.1f}%;background:{color}"></div></div>'
+        bar = (f'<div class="bar"><div style="width:{w:.1f}%;'
+               f'background:linear-gradient(90deg,{warna},{warna}bb)"></div></div>')
     return (
-        f'<div class="kpi"><div class="lbl">{label}</div>'
-        f'<div class="val">{value}</div>'
-        f'<div class="sub">{sub}</div>{bar}</div>'
+        f'<div class="kpi"><div class="cap" style="background:linear-gradient('
+        f'90deg,{warna},{warna}55)"></div>'
+        f'<div class="row"><div class="ico" style="background:{warna}1f">{ikon}</div>'
+        f'<div class="lbl">{label}</div></div>'
+        f'<div class="val">{nilai}</div><div class="sub">{sub}</div>{bar}</div>'
     )
 
 
-def style_fig(fig, height: int = 340, legend: bool = True):
+def kartu_insight(d: dict) -> str:
+    c = d["c"]
+    return (
+        f'<div class="ins" style="background:{c}12;border-color:{c}33;color:{c}">'
+        f'<div class="t">{d["t"]}</div>'
+        f'<div class="v" style="color:{INK}">{d["v"]}</div>'
+        f'<div class="d" style="color:{MUTED}">{d["d"]}</div></div>'
+    )
+
+
+def kartu_podium(medali: str, nama: str, km: float, sub: str, warna: str) -> str:
+    return (
+        f'<div class="pod"><div class="m">{medali}</div>'
+        f'<div class="n">{nama}</div>'
+        f'<div class="k" style="color:{warna}">{km:.1f} km</div>'
+        f'<div class="s">{sub}</div></div>'
+    )
+
+
+def rapikan(fig, tinggi: int = 340, legend: bool = True):
     fig.update_layout(
-        height=height,
-        margin=dict(l=10, r=10, t=30, b=10),
+        height=tinggi,
+        margin=dict(l=8, r=8, t=26, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Inter, Segoe UI, system-ui, sans-serif", size=12, color=INK),
-        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor=GRID),
+        font=dict(family="Plus Jakarta Sans, system-ui, sans-serif", size=12, color=INK),
+        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor=GRID,
+                        font_family="Plus Jakarta Sans"),
         showlegend=legend,
         legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
-                    title_text=""),
+                    title_text="", font=dict(size=11)),
     )
-    fig.update_xaxes(showgrid=False, linecolor=GRID, tickfont=dict(color=MUTED))
+    fig.update_xaxes(showgrid=False, linecolor=GRID, tickfont=dict(color=MUTED, size=11))
     fig.update_yaxes(gridcolor=GRID, zeroline=False, linecolor="rgba(0,0,0,0)",
-                     tickfont=dict(color=MUTED))
+                     tickfont=dict(color=MUTED, size=11))
     return fig
 
 
-def sec(title: str, sub: str = ""):
-    st.markdown(f'<div class="sec">{title}</div>', unsafe_allow_html=True)
+def judul(teks: str, sub: str = ""):
+    st.markdown(f'<div class="sec">{teks}</div>', unsafe_allow_html=True)
     if sub:
         st.markdown(f'<div class="sec-sub">{sub}</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
-# Chart builders
+# Grafik
 # ---------------------------------------------------------------------------
 
-def chart_status_donut(rekap: pd.DataFrame):
-    counts = rekap["Status"].value_counts().reindex(STATUS_ORDER, fill_value=0)
+def g_donat_status(rekap: pd.DataFrame):
+    c = rekap["Status"].value_counts().reindex(STATUS_ORDER, fill_value=0)
     fig = go.Figure(go.Pie(
-        labels=list(counts.index), values=list(counts.values), hole=0.62, sort=False,
-        marker=dict(colors=[STATUS_COLOR[s] for s in counts.index],
-                    line=dict(color="white", width=2)),
-        textinfo="value", textfont=dict(size=13, color="white"),
+        labels=[f"{STATUS_EMOJI[s]} {s}" for s in c.index], values=list(c.values),
+        hole=0.66, sort=False,
+        marker=dict(colors=[STATUS_COLOR[s] for s in c.index],
+                    line=dict(color="white", width=3)),
+        textinfo="value", textfont=dict(size=13, color="white", family="Plus Jakarta Sans"),
         hovertemplate="<b>%{label}</b><br>%{value} orang (%{percent})<extra></extra>",
     ))
-    total = int(counts.sum())
-    tercapai = int(counts.get("Tercapai", 0))
+    total, ok = int(c.sum()), int(c.get("Tercapai", 0))
     fig.add_annotation(
-        text=f"<b style='font-size:26px'>{tercapai}</b><br>"
+        text=f"<b style='font-size:30px;color:{EMERALD}'>{ok}</b><br>"
              f"<span style='font-size:11px;color:{MUTED}'>dari {total} tercapai</span>",
-        showarrow=False, font=dict(color=INK),
-    )
-    return style_fig(fig, 320)
+        showarrow=False)
+    return rapikan(fig, 320)
 
 
-def chart_leaderboard(rekap: pd.DataFrame, top_n: int):
-    d = rekap[rekap["Aktual KM"] > 0].nlargest(top_n, "Aktual KM").sort_values("Aktual KM")
+def g_leaderboard(rekap: pd.DataFrame, n: int):
+    d = rekap[rekap["Aktual KM"] > 0].nlargest(n, "Aktual KM").sort_values("Aktual KM")
     if d.empty:
         return None
-    d = d.assign(_pct=d["Pencapaian %"].clip(upper=200))
     fig = go.Figure(go.Bar(
         x=d["Aktual KM"], y=d["Nama"], orientation="h",
-        marker=dict(color=d["_pct"], colorscale=[[0, DANGER], [0.5, WARN], [1, SUCCESS]],
-                    cmin=0, cmax=100, line=dict(width=0)),
+        marker=dict(color=d["Pencapaian %"].clip(upper=120),
+                    colorscale=[[0, ROSE], [0.45, AMBER], [0.8, INDIGO], [1, EMERALD]],
+                    cmin=0, cmax=120, line=dict(width=0)),
         text=[f"{v:.1f} km · {p:.0f}%" for v, p in zip(d["Aktual KM"], d["Pencapaian %"])],
         textposition="outside", textfont=dict(size=11, color=MUTED),
         customdata=np.stack([d["Target KM"], d["Total Aktivitas"], d["Divisi"]], axis=-1),
-        hovertemplate="<b>%{y}</b><br>Aktual: %{x:.2f} km<br>Target: %{customdata[0]:.0f} km"
-                      "<br>Aktivitas: %{customdata[1]}x<br>%{customdata[2]}<extra></extra>",
+        hovertemplate="<b>%{y}</b><br>Aktual %{x:.2f} km dari target %{customdata[0]:.0f} km"
+                      "<br>%{customdata[1]} aktivitas · %{customdata[2]}<extra></extra>",
     ))
-    fig.update_xaxes(title_text="Jarak tempuh (km)", range=[0, d["Aktual KM"].max() * 1.32])
-    return style_fig(fig, max(300, 34 * len(d) + 90), legend=False)
+    fig.update_xaxes(title_text="Jarak tempuh (km)", range=[0, d["Aktual KM"].max() * 1.35])
+    return rapikan(fig, max(300, 33 * len(d) + 85), legend=False)
 
 
-def chart_tren(resp: pd.DataFrame, start, end, target_harian: float | None):
-    daily = (resp.groupby("Tanggal")
-             .agg(KM=(COL_KM, "sum"), Aktivitas=(COL_KM, "size"),
-                  Peserta=("Peserta", "nunique"))
-             .reindex(pd.date_range(start, end, freq="D"), fill_value=0))
-    daily.index.name = "Tanggal"
-    daily = daily.reset_index()
-    daily["Kumulatif"] = daily["KM"].cumsum()
-
-    today = pd.Timestamp(datetime.now(WITA).date())
-    view = daily[daily["Tanggal"] <= max(today, resp["Tanggal"].max())]
+def g_tren(resp: pd.DataFrame, start, end, pace_harian: float | None):
+    idx = pd.date_range(start, end, freq="D")
+    d = (resp.groupby("Tanggal")
+         .agg(KM=(COL_KM, "sum"), Akt=(COL_KM, "size"), Org=("Peserta", "nunique"))
+         .reindex(idx, fill_value=0))
+    d.index.name = "Tanggal"
+    d = d.reset_index()
+    d["Kum"] = d["KM"].cumsum()
+    batas = max(pd.Timestamp(datetime.now(WITA).date()), resp["Tanggal"].max())
+    v = d[d["Tanggal"] <= batas]
 
     fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=v["Tanggal"], y=v["Kum"], name="Kumulatif", yaxis="y2", mode="lines",
+        line=dict(color=VIOLET, width=3, shape="spline"),
+        fill="tozeroy", fillcolor="rgba(139,92,246,.13)",
+        hovertemplate="Kumulatif %{y:.1f} km<extra></extra>",
+    ))
     fig.add_trace(go.Bar(
-        x=view["Tanggal"], y=view["KM"], name="KM per hari",
-        marker=dict(color=ACCENT, opacity=0.82, line=dict(width=0)),
-        customdata=np.stack([view["Aktivitas"], view["Peserta"]], axis=-1),
+        x=v["Tanggal"], y=v["KM"], name="KM per hari",
+        marker=dict(color=INDIGO, line=dict(width=0)), opacity=.9,
+        customdata=np.stack([v["Akt"], v["Org"]], axis=-1),
         hovertemplate="<b>%{x|%d %b}</b><br>%{y:.2f} km<br>"
                       "%{customdata[0]} aktivitas · %{customdata[1]} peserta<extra></extra>",
     ))
-    fig.add_trace(go.Scatter(
-        x=view["Tanggal"], y=view["Kumulatif"], name="Kumulatif", yaxis="y2",
-        mode="lines+markers", line=dict(color=INK, width=2.4),
-        marker=dict(size=5, color=INK),
-        hovertemplate="Kumulatif: %{y:.1f} km<extra></extra>",
-    ))
-    if target_harian:
-        fig.add_hline(y=target_harian, line=dict(color=SUCCESS, width=1.4, dash="dot"),
-                      annotation_text=f"Pace ideal {target_harian:.1f} km/hari",
+    if pace_harian:
+        fig.add_hline(y=pace_harian, line=dict(color=EMERALD, width=1.5, dash="dot"),
+                      annotation_text=f"Pace ideal {pace_harian:.1f} km/hari",
                       annotation_position="top left",
-                      annotation_font=dict(size=10, color=SUCCESS))
+                      annotation_font=dict(size=10, color=EMERALD))
     fig.update_layout(
         yaxis=dict(title="KM per hari"),
         yaxis2=dict(title="Kumulatif (km)", overlaying="y", side="right",
-                    showgrid=False, tickfont=dict(color=MUTED)),
-        barmode="overlay",
+                    showgrid=False, tickfont=dict(color=MUTED, size=11)),
     )
-    return style_fig(fig, 380)
+    return rapikan(fig, 370)
 
 
-def chart_divisi(rekap: pd.DataFrame):
-    d = (rekap.groupby("Divisi")
-         .agg(Aktual=("Aktual KM", "sum"), Peserta=("Peserta", "size"),
-              Aktif=("Aktual KM", lambda s: int((s > 0).sum())))
-         .reset_index())
-    d["Partisipasi %"] = d["Aktif"] / d["Peserta"] * 100
-    d = d.sort_values("Aktual")
+def g_hari(resp: pd.DataFrame):
+    if resp.empty:
+        return None
+    s = resp.groupby(resp["Tanggal"].dt.dayofweek).agg(
+        KM=(COL_KM, "sum"), Akt=(COL_KM, "size")).reindex(range(7), fill_value=0)
+    warna = [EMERALD if i == int(s["KM"].idxmax()) else "#C7CBE8" for i in range(7)]
     fig = go.Figure(go.Bar(
-        x=d["Aktual"], y=d["Divisi"], orientation="h",
-        marker=dict(color=ACCENT, line=dict(width=0)),
-        text=[f"{v:.0f} km" for v in d["Aktual"]], textposition="outside",
-        textfont=dict(size=11, color=MUTED),
-        customdata=np.stack([d["Aktif"], d["Peserta"], d["Partisipasi %"]], axis=-1),
-        hovertemplate="<b>%{y}</b><br>%{x:.1f} km<br>"
-                      "%{customdata[0]}/%{customdata[1]} aktif (%{customdata[2]:.0f}%)<extra></extra>",
+        x=HARI_ID, y=s["KM"], marker=dict(color=warna, line=dict(width=0)),
+        text=[f"{v:.0f}" if v else "" for v in s["KM"]], textposition="outside",
+        textfont=dict(size=10, color=MUTED), customdata=s["Akt"],
+        hovertemplate="<b>%{x}</b><br>%{y:.1f} km · %{customdata} aktivitas<extra></extra>",
     ))
-    fig.update_xaxes(range=[0, max(d["Aktual"].max() * 1.25, 1)])
-    return style_fig(fig, max(280, 32 * len(d) + 80), legend=False)
+    fig.update_yaxes(title_text="Total KM", range=[0, max(s["KM"].max() * 1.25, 1)])
+    return rapikan(fig, 300, legend=False)
 
 
-def chart_status_divisi(rekap: pd.DataFrame):
-    piv = (rekap.pivot_table(index="Divisi", columns="Status", values="Peserta",
-                             aggfunc="count", observed=False)
-           .reindex(columns=STATUS_ORDER).fillna(0))
-    piv = piv.loc[piv.sum(axis=1).sort_values().index]
+def g_jam(resp: pd.DataFrame):
+    ts = resp[COL_TS].dropna()
+    if ts.empty:
+        return None
+    s = ts.dt.hour.value_counts().reindex(range(24), fill_value=0).sort_index()
+    fig = go.Figure(go.Bar(
+        x=[f"{h:02d}" for h in s.index], y=s.values,
+        marker=dict(color=s.values, colorscale=[[0, "#E4E7F7"], [1, CYAN]],
+                    line=dict(width=0)),
+        hovertemplate="Pukul %{x}:00<br>%{y} submission<extra></extra>",
+    ))
+    fig.update_yaxes(title_text="Jumlah submit")
+    fig.update_xaxes(title_text="Jam (WITA)")
+    return rapikan(fig, 300, legend=False)
+
+
+def g_sebaran(rekap: pd.DataFrame):
+    d = rekap[rekap["Aktual KM"] > 0]["Pencapaian %"]
+    if d.empty:
+        return None
+    tepi = [0, 25, 50, 75, 100, 1e9]
+    label = ["0–25%", "25–50%", "50–75%", "75–100%", "≥100%"]
+    warna = [ROSE, "#FB923C", AMBER, INDIGO, EMERALD]
+    n = pd.cut(d, bins=tepi, labels=label, right=False).value_counts().reindex(label,
+                                                                              fill_value=0)
+    fig = go.Figure(go.Bar(
+        x=label, y=n.values, marker=dict(color=warna, line=dict(width=0)),
+        text=[f"{v}" if v else "" for v in n.values], textposition="outside",
+        textfont=dict(size=11, color=MUTED),
+        hovertemplate="<b>%{x}</b> dari target<br>%{y} peserta<extra></extra>",
+    ))
+    fig.update_yaxes(title_text="Jumlah peserta", range=[0, max(n.max() * 1.3, 1)])
+    return rapikan(fig, 300, legend=False)
+
+
+def g_status_divisi(rekap: pd.DataFrame):
+    p = (rekap.pivot_table(index="Divisi", columns="Status", values="Peserta",
+                           aggfunc="count", observed=False)
+         .reindex(columns=STATUS_ORDER).fillna(0))
+    p = p.loc[p.sum(axis=1).sort_values().index]
     fig = go.Figure()
     for s in STATUS_ORDER:
         fig.add_trace(go.Bar(
-            x=piv[s], y=piv.index, name=s, orientation="h",
+            x=p[s], y=p.index, name=f"{STATUS_EMOJI[s]} {s}", orientation="h",
             marker=dict(color=STATUS_COLOR[s], line=dict(width=0)),
             hovertemplate=f"<b>%{{y}}</b><br>{s}: %{{x:.0f}} orang<extra></extra>",
         ))
     fig.update_layout(barmode="stack")
     fig.update_xaxes(title_text="Jumlah karyawan")
-    return style_fig(fig, max(280, 32 * len(piv) + 90))
+    return rapikan(fig, max(290, 31 * len(p) + 95))
 
 
-def chart_entitas(rekap: pd.DataFrame):
-    d = (rekap.groupby("Entitas")
-         .agg(Peserta=("Peserta", "size"),
-              Aktif=("Aktual KM", lambda s: int((s > 0).sum())),
-              KM=("Aktual KM", "sum"))
+def g_divisi(rekap: pd.DataFrame):
+    d = (rekap.groupby("Divisi", observed=False)
+         .agg(KM=("Aktual KM", "sum"), N=("Peserta", "size"),
+              A=("Aktual KM", lambda s: int((s > 0).sum())))
+         .reset_index().sort_values("KM"))
+    d["P"] = d["A"] / d["N"] * 100
+    fig = go.Figure(go.Bar(
+        x=d["KM"], y=d["Divisi"], orientation="h",
+        marker=dict(color=[PALETTE[i % len(PALETTE)] for i in range(len(d))],
+                    line=dict(width=0)),
+        text=[f"{v:.0f} km" for v in d["KM"]], textposition="outside",
+        textfont=dict(size=11, color=MUTED),
+        customdata=np.stack([d["A"], d["N"], d["P"]], axis=-1),
+        hovertemplate="<b>%{y}</b><br>%{x:.1f} km<br>"
+                      "%{customdata[0]}/%{customdata[1]} aktif "
+                      "(%{customdata[2]:.0f}%)<extra></extra>",
+    ))
+    fig.update_xaxes(range=[0, max(d["KM"].max() * 1.28, 1)])
+    return rapikan(fig, max(280, 31 * len(d) + 80), legend=False)
+
+
+def g_entitas(rekap: pd.DataFrame):
+    d = (rekap.groupby("Entitas", observed=False)
+         .agg(N=("Peserta", "size"), A=("Aktual KM", lambda s: int((s > 0).sum())))
          .reset_index())
-    d["Partisipasi %"] = d["Aktif"] / d["Peserta"] * 100
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=d["Entitas"], y=d["Aktif"], name="Sudah submit",
-        marker=dict(color=ACCENT, line=dict(width=0)),
-        text=[f"{a}/{p}" for a, p in zip(d["Aktif"], d["Peserta"])],
-        textposition="inside", textfont=dict(color="white", size=12),
-        hovertemplate="<b>%{x}</b><br>Aktif: %{y} orang<extra></extra>",
-    ))
+        x=d["Entitas"], y=d["A"], name="Sudah submit",
+        marker=dict(color=INDIGO, line=dict(width=0)),
+        text=[f"{a}/{n}" for a, n in zip(d["A"], d["N"])], textposition="inside",
+        textfont=dict(color="white", size=12),
+        hovertemplate="<b>%{x}</b><br>Aktif %{y} orang<extra></extra>"))
     fig.add_trace(go.Bar(
-        x=d["Entitas"], y=d["Peserta"] - d["Aktif"], name="Belum submit",
-        marker=dict(color="#E2E8F0", line=dict(width=0)),
-        hovertemplate="<b>%{x}</b><br>Belum: %{y} orang<extra></extra>",
-    ))
+        x=d["Entitas"], y=d["N"] - d["A"], name="Belum submit",
+        marker=dict(color="#DFE3F3", line=dict(width=0)),
+        hovertemplate="<b>%{x}</b><br>Belum %{y} orang<extra></extra>"))
     fig.update_layout(barmode="stack")
     fig.update_yaxes(title_text="Jumlah karyawan")
-    return style_fig(fig, 320)
+    return rapikan(fig, 300)
 
 
-def chart_jenis(rekap: pd.DataFrame):
+def g_jenis(rekap: pd.DataFrame):
     d = rekap[rekap["Aktual KM"] > 0]
     if d.empty:
         return None
-    g = (d.groupby("Jenis")
-         .agg(Peserta=("Peserta", "size"), KM=("Aktual KM", "sum"),
-              Pencapaian=("Pencapaian %", "mean"))
+    g = (d.groupby("Jenis").agg(N=("Peserta", "size"), KM=("Aktual KM", "sum"),
+                                P=("Pencapaian %", "mean"))
          .reset_index().sort_values("KM", ascending=False))
     fig = go.Figure(go.Bar(
         x=g["Jenis"], y=g["KM"],
-        marker=dict(color=[ACCENT, SUCCESS, WARN, MUTED][: len(g)], line=dict(width=0)),
+        marker=dict(color=[PALETTE[i % len(PALETTE)] for i in range(len(g))],
+                    line=dict(width=0)),
         text=[f"{v:.0f} km" for v in g["KM"]], textposition="outside",
         textfont=dict(size=11, color=MUTED),
-        customdata=np.stack([g["Peserta"], g["Pencapaian"]], axis=-1),
-        hovertemplate="<b>%{x}</b><br>%{y:.1f} km<br>%{customdata[0]} peserta"
-                      "<br>Rata2 pencapaian %{customdata[1]:.0f}%<extra></extra>",
+        customdata=np.stack([g["N"], g["P"]], axis=-1),
+        hovertemplate="<b>%{x}</b><br>%{y:.1f} km · %{customdata[0]} peserta"
+                      "<br>Rata-rata %{customdata[1]:.0f}% target<extra></extra>",
     ))
-    fig.update_yaxes(title_text="Total KM", range=[0, g["KM"].max() * 1.25])
-    return style_fig(fig, 320, legend=False)
+    fig.update_yaxes(title_text="Total KM", range=[0, g["KM"].max() * 1.28])
+    return rapikan(fig, 300, legend=False)
 
 
-def chart_heatmap(resp: pd.DataFrame, start, end, top_n: int = 20):
-    piv = resp.pivot_table(index="Nama", columns="Tanggal", values=COL_KM, aggfunc="sum")
-    if piv.empty:
+def g_heatmap(resp: pd.DataFrame, start, end, n: int = 20):
+    p = resp.pivot_table(index="Nama", columns="Tanggal", values=COL_KM, aggfunc="sum")
+    if p.empty:
         return None
-    piv = piv.loc[piv.sum(axis=1).nlargest(top_n).index]
-    piv = piv.reindex(columns=pd.date_range(start, end, freq="D"))
-    piv = piv.loc[piv.sum(axis=1).sort_values().index]
-
+    p = p.loc[p.sum(axis=1).nlargest(n).index]
+    p = p.reindex(columns=pd.date_range(start, end, freq="D"))
+    p = p.loc[p.sum(axis=1).sort_values().index]
     fig = go.Figure(go.Heatmap(
-        z=piv.values, x=[d.strftime("%d %b") for d in piv.columns], y=piv.index,
-        colorscale=[[0, "#EFF6FF"], [0.5, "#93C5FD"], [1, ACCENT]],
+        z=p.values, x=[d.strftime("%d %b") for d in p.columns], y=p.index,
+        colorscale=[[0, "#EEF0FC"], [.35, "#A5B4FC"], [.7, INDIGO], [1, VIOLET]],
         xgap=3, ygap=3, hoverongaps=False,
-        colorbar=dict(title="KM", thickness=10, len=0.8, outlinewidth=0),
+        colorbar=dict(title="KM", thickness=10, len=.8, outlinewidth=0),
         hovertemplate="<b>%{y}</b><br>%{x}: %{z:.2f} km<extra></extra>",
     ))
-    return style_fig(fig, max(300, 26 * len(piv) + 110), legend=False)
+    return rapikan(fig, max(300, 25 * len(p) + 105), legend=False)
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Pemuatan data (otomatis, tanpa pilihan di UI)
+# ---------------------------------------------------------------------------
+
+def _secret(path: str, default=None):
+    try:
+        node = st.secrets
+        for k in path.split("."):
+            if k not in node:
+                return default
+            node = node[k]
+        return node
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def ambil_data():
+    """Baca Google Sheet: pakai service account kalau ada, kalau tidak CSV export."""
+    sid = str(_secret("gsheet.sheet_id", DEFAULT_SHEET_ID))
+    if HAS_GSPREAD and _secret("gcp_service_account") is not None:
+        return load_gsheet_sa(
+            sid,
+            str(_secret("gsheet.worksheet_responses", DEFAULT_WS_RESP)),
+            str(_secret("gsheet.worksheet_roster", DEFAULT_WS_ROSTER) or "") or None,
+            st.secrets["gcp_service_account"],
+        ), "service account"
+    return load_gsheet_csv(
+        sid,
+        str(_secret("gsheet.gid_responses", DEFAULT_GID_RESP)),
+        str(_secret("gsheet.gid_roster", "") or "") or None,
+    ), "CSV export"
+
+
+def gerbang_akses() -> bool:
+    """Halaman kata sandi bersama. Dilewati kalau [auth].password kosong."""
+    sandi = str(_secret("auth.password", "") or "")
+    if not sandi or st.session_state.get("_akses_ok"):
+        return True
+
+    _, mid, _ = st.columns([1, 1.15, 1])
+    with mid:
+        st.markdown(
+            f'<div style="margin-top:10vh"></div>'
+            f'<div class="hero"><h1>{APP_TITLE}</h1>'
+            f'<p>{APP_SUB}</p></div><div style="height:1.1rem"></div>',
+            unsafe_allow_html=True)
+        with st.form("login"):
+            masuk = st.text_input("Kata sandi", type="password",
+                                  label_visibility="collapsed",
+                                  placeholder="Masukkan kata sandi")
+            kirim = st.form_submit_button("Masuk", width="stretch", type="primary")
+        if kirim:
+            if hmac.compare_digest(masuk, sandi):
+                st.session_state["_akses_ok"] = True
+                st.session_state.pop("_gagal", None)
+                st.rerun()
+            else:
+                st.session_state["_gagal"] = st.session_state.get("_gagal", 0) + 1
+        if st.session_state.get("_gagal"):
+            st.error(f"Kata sandi salah. Percobaan ke-{st.session_state['_gagal']}.",
+                     icon="🔒")
+        st.caption("Hubungi HRGA / IT kalau belum punya akses.")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Halaman
 # ---------------------------------------------------------------------------
 
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🏃", layout="wide",
-                       initial_sidebar_state="expanded")
+                       initial_sidebar_state="collapsed")
     st.markdown(CSS, unsafe_allow_html=True)
 
-    # ---------------- Sidebar: sumber data ----------------
-    with st.sidebar:
-        st.markdown(f"### {APP_TITLE}")
-        st.caption("Ops monitoring · TPB & GTN")
-        st.divider()
-
-        try:  # st.secrets bisa melempar error kalau secrets.toml belum ada
-            has_sa = HAS_GSPREAD and "gcp_service_account" in st.secrets
-        except Exception:  # noqa: BLE001
-            has_sa = False
-        opsi = ["Google Sheet (service account)"] if has_sa else []
-        opsi += ["Upload file Excel", "Google Sheet (link publik)"]
-
-        sumber = st.radio("Sumber data", opsi, index=0)
-
-        data, err = None, None
-
-        if sumber == "Google Sheet (service account)":
-            cfg = st.secrets.get("gsheet", {})
-            sid = cfg.get("sheet_id", DEFAULT_SHEET_ID)
-            ws_r = cfg.get("worksheet_responses", "Form Responses 1")
-            ws_m = cfg.get("worksheet_roster", "Sheet1")
-            st.caption(f"Terhubung ke sheet `{sid[:12]}…` · tab **{ws_r}**")
-            if st.button("🔄 Refresh data", width="stretch", type="primary"):
-                st.cache_data.clear()
-                st.rerun()
-            try:
-                data = load_gsheet_sa(sid, ws_r, ws_m or None,
-                                      st.secrets["gcp_service_account"])
-            except Exception as e:  # noqa: BLE001
-                err = str(e)
-
-        elif sumber == "Upload file Excel":
-            up = st.file_uploader("File hasil export Google Form (.xlsx)", type=["xlsx", "xlsm"])
-            if up is not None:
-                try:
-                    data = load_excel(up.getvalue())
-                except Exception as e:  # noqa: BLE001
-                    err = str(e)
-            else:
-                st.info("Upload file export Google Form untuk memulai.", icon="📄")
-
-        else:
-            sid = st.text_input("Sheet ID", value=DEFAULT_SHEET_ID)
-            gid_r = st.text_input("GID tab Form Responses", value=DEFAULT_GID_RESP)
-            gid_m = st.text_input("GID tab master karyawan (opsional)", value="")
-            st.caption("Sheet harus di-share **Anyone with the link → Viewer**.")
-            if st.button("🔄 Refresh data", width="stretch", type="primary"):
-                st.cache_data.clear()
-                st.rerun()
-            if sid and gid_r:
-                try:
-                    data = load_gsheet_csv(sid.strip(), gid_r.strip(), gid_m.strip() or None)
-                except Exception as e:  # noqa: BLE001
-                    err = str(e)
-
-        if err:
-            st.error(f"Gagal membaca data: {err}", icon="⚠️")
-
-    if data is None:
-        st.markdown(
-            f'<div class="hero"><h1>{APP_TITLE}</h1>'
-            f'<p>{APP_SUB}</p></div>', unsafe_allow_html=True)
-        st.info(
-            "Pilih sumber data di panel kiri untuk menampilkan dashboard.\n\n"
-            "**Format yang diharapkan** — tab *Form Responses* dengan kolom: "
-            f"`{COL_TS}`, `{COL_NAMA}`, `{COL_KAT}`, `{COL_TGL}`, `{COL_KM}`, "
-            f"`{COL_BULAN}`, `{COL_BUKTI}`. Tab kedua (opsional) berisi daftar master "
-            "karyawan untuk menghitung tingkat partisipasi.",
-            icon="👈",
-        )
+    if not gerbang_akses():
         return
 
-    resp_all, roster_all = data
+    try:
+        (resp_all, roster_all), mode = ambil_data()
+    except Exception as e:  # noqa: BLE001
+        st.markdown(f'<div class="hero"><h1>{APP_TITLE}</h1><p>{APP_SUB}</p></div>',
+                    unsafe_allow_html=True)
+        st.error(f"Gagal memuat Google Sheet: {e}", icon="⚠️")
+        st.info(
+            "Periksa **App settings → Secrets**: `[gsheet] sheet_id`, nama tab, dan "
+            "kredensial `[gcp_service_account]`. Kalau memakai CSV export, sheet harus "
+            "di-share *Anyone with the link → Viewer*.", icon="🔧")
+        return
 
-    # ---------------- Sidebar: filter ----------------
-    with st.sidebar:
-        st.divider()
-        st.markdown("**Filter**")
+    periodes = (resp_all[["Periode", "Periode Label"]].dropna()
+                .drop_duplicates().sort_values("Periode", ascending=False))
+    if periodes.empty:
+        st.error("Tidak ada periode yang bisa dibaca dari sheet.", icon="⚠️")
+        return
 
-        periodes = (resp_all[["Periode", "Periode Label"]].dropna()
-                    .drop_duplicates().sort_values("Periode", ascending=False))
-        if periodes.empty:
-            st.error("Tidak ada periode yang bisa dibaca dari data.")
-            return
+    # ---------------- filter di halaman utama ----------------
+    f1, f2, f3 = st.columns([1.5, 2.6, 1.1])
+    with f1:
         pilih = st.selectbox("Periode", periodes["Periode Label"].tolist(), index=0)
-        periode = periodes.loc[periodes["Periode Label"] == pilih, "Periode"].iloc[0]
-
-        ent_opsi = sorted(roster_all["Entitas"].unique())
-        ent = st.multiselect("Entitas", ent_opsi, default=ent_opsi)
-
-        div_opsi = sorted(roster_all["Divisi"].unique())
-        div = st.multiselect("Divisi", div_opsi, default=div_opsi)
-
-        st.divider()
-        st.markdown("**Pengaturan**")
-        target_default = st.number_input(
-            "Target default untuk yang belum submit (km)",
-            min_value=1.0, max_value=100.0, value=7.0, step=1.0,
-            help="Dipakai saat kategori peserta belum diketahui karena belum pernah submit.",
-        )
-        top_n = st.slider("Jumlah peserta di leaderboard", 5, 40, 15)
-
-    roster = roster_all[roster_all["Entitas"].isin(ent) & roster_all["Divisi"].isin(div)].copy()
-    resp = resp_all[(resp_all["Periode"] == periode)
-                    & resp_all["Peserta"].isin(set(roster["Peserta"]))].copy()
-
+    periode = periodes.loc[periodes["Periode Label"] == pilih, "Periode"].iloc[0]
     berjalan, total_hari, start, end = periode_progress(periode)
     ratio = berjalan / total_hari if total_hari else 0.0
+    sisa_hari = max(total_hari - berjalan, 0)
 
+    ent_opsi = sorted(roster_all["Entitas"].unique())
+    with f2:
+        ent = st.segmented_control("Entitas", ent_opsi, default=ent_opsi,
+                                   selection_mode="multi") or ent_opsi
+    with f3:
+        st.markdown('<div style="height:1.72rem"></div>', unsafe_allow_html=True)
+        if st.button("🔄 Muat ulang", width="stretch"):
+            st.cache_data.clear()
+            st.rerun()
+
+    div_opsi = sorted(roster_all["Divisi"].unique())
+    div = st.pills("Divisi", div_opsi, default=div_opsi,
+                   selection_mode="multi") or div_opsi
+
+    with st.expander("⚙️ Pengaturan lanjutan"):
+        c1, c2 = st.columns(2)
+        target_default = c1.number_input(
+            "Target default untuk yang belum submit (km)", 1.0, 100.0, 7.0, 1.0,
+            help="Dipakai karena kategori peserta belum diketahui sebelum submit pertama.")
+        top_n = c2.slider("Jumlah peserta di leaderboard", 5, 40, 15)
+        st.caption(f"Sumber data: Google Sheet via {mode} · cache 5 menit. "
+                   f"Ambang On Track: {ratio * 100:.0f}% dari target bulanan.")
+        if _secret("auth.password") and st.button("Keluar"):
+            st.session_state.pop("_akses_ok", None)
+            st.rerun()
+
+    roster = roster_all[roster_all["Entitas"].isin(ent)
+                        & roster_all["Divisi"].isin(div)].copy()
+    resp = resp_all[(resp_all["Periode"] == periode)
+                    & resp_all["Peserta"].isin(set(roster["Peserta"]))].copy()
     rekap = build_rekap(resp, roster, ratio, target_default)
 
-    # ---------------- Header ----------------
+    # ---------------- hero ----------------
     now = datetime.now(WITA)
     st.markdown(
-        f'<div class="hero"><h1>{APP_TITLE}'
-        f'<span class="pill">{pilih}</span></h1>'
-        f'<p>{APP_SUB} · Hari ke-{berjalan} dari {total_hari} '
-        f'({start:%d %b} – {end:%d %b %Y}) · diperbarui {now:%d %b %Y, %H:%M} WITA</p></div>',
-        unsafe_allow_html=True,
-    )
+        f'<div class="hero"><h1>{APP_TITLE}</h1><p>{APP_SUB}</p>'
+        f'<div class="tags"><span class="tag">📅 {pilih}</span>'
+        f'<span class="tag">⏱️ Hari ke-{berjalan} dari {total_hari}</span>'
+        f'<span class="tag">👥 {len(rekap)} karyawan</span>'
+        f'<span class="tag">🕒 {now:%d %b %Y, %H:%M} WITA</span></div>'
+        f'<div class="track"><div style="width:{ratio * 100:.1f}%"></div></div></div>',
+        unsafe_allow_html=True)
+    st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
     if rekap.empty:
         st.warning("Tidak ada data untuk kombinasi filter ini.", icon="🔍")
         return
 
+    r = hitung_ringkasan(rekap, ratio)
+
     # ---------------- KPI ----------------
-    n_roster = len(rekap)
-    n_aktif = int((rekap["Aktual KM"] > 0).sum())
-    partisipasi = n_aktif / n_roster * 100 if n_roster else 0
-    total_km = rekap["Aktual KM"].sum()
-    total_akt = int(rekap["Total Aktivitas"].sum())
-    n_tercapai = int((rekap["Status"] == "Tercapai").sum())
-    pct_tercapai = n_tercapai / n_roster * 100 if n_roster else 0
-    total_target = rekap["Target KM"].sum()
-    pace_pct = total_km / (total_target * ratio) * 100 if total_target and ratio else 0
-    km_per_aktif = total_km / n_aktif if n_aktif else 0
+    k = st.columns(5)
+    k[0].markdown(kartu_kpi(
+        "Partisipasi", f"{r['aktif']}<small>/{r['n']}</small>",
+        f"{r['partisipasi']:.0f}% karyawan sudah submit", "👥", INDIGO,
+        r["partisipasi"]), unsafe_allow_html=True)
+    k[1].markdown(kartu_kpi(
+        "Total Jarak", f"{r['total_km']:,.0f}<small> km</small>",
+        f"dari target kolektif {r['total_target']:,.0f} km", "🏃", CYAN,
+        r["progres_km"]), unsafe_allow_html=True)
+    k[2].markdown(kartu_kpi(
+        "Capai Target", f"{r['tercapai']}<small>/{r['n']}</small>",
+        f"{r['pct_tercapai']:.0f}% dari karyawan terpilih", "🏆", EMERALD,
+        r["pct_tercapai"]), unsafe_allow_html=True)
+    wp = EMERALD if r["pace_pct"] >= 100 else (AMBER if r["pace_pct"] >= 70 else ROSE)
+    k[3].markdown(kartu_kpi(
+        "Pace vs Ideal", f"{r['pace_pct']:.0f}<small>%</small>",
+        f"pace ideal hari ini {r['pace_ideal']:,.0f} km", "⚡", wp,
+        min(r["pace_pct"], 100)), unsafe_allow_html=True)
+    proy = r["proyeksi"] / r["total_target"] * 100 if r["total_target"] else 0
+    wr = EMERALD if proy >= 100 else (AMBER if proy >= 70 else ROSE)
+    k[4].markdown(kartu_kpi(
+        "Proyeksi Akhir Bulan", f"{r['proyeksi']:,.0f}<small> km</small>",
+        f"{proy:.0f}% target · {r['aktivitas']} aktivitas tercatat", "🎯", wr,
+        min(proy, 100)), unsafe_allow_html=True)
 
-    c = st.columns(5)
-    c[0].markdown(kpi_card(
-        "Partisipasi", f"{n_aktif}<small>/{n_roster}</small>",
-        f"{partisipasi:.0f}% karyawan sudah submit", partisipasi, ACCENT), unsafe_allow_html=True)
-    c[1].markdown(kpi_card(
-        "Total Jarak", f"{total_km:,.0f}<small> km</small>",
-        f"dari target kolektif {total_target:,.0f} km",
-        total_km / total_target * 100 if total_target else 0, SUCCESS), unsafe_allow_html=True)
-    c[2].markdown(kpi_card(
-        "Sudah Capai Target", f"{n_tercapai}<small>/{n_roster}</small>",
-        f"{pct_tercapai:.0f}% dari total karyawan", pct_tercapai, SUCCESS),
-        unsafe_allow_html=True)
-    warna_pace = SUCCESS if pace_pct >= 100 else (WARN if pace_pct >= 70 else DANGER)
-    c[3].markdown(kpi_card(
-        "Pace vs Ideal", f"{pace_pct:.0f}<small>%</small>",
-        f"pace ideal hari ke-{berjalan}: {total_target * ratio:,.0f} km",
-        min(pace_pct, 100), warna_pace), unsafe_allow_html=True)
-    c[4].markdown(kpi_card(
-        "Aktivitas Tercatat", f"{total_akt}",
-        f"rata-rata {km_per_aktif:.1f} km per peserta aktif"), unsafe_allow_html=True)
+    # ---------------- insight ----------------
+    ins = susun_insight(rekap, resp, r, sisa_hari)
+    if ins:
+        st.markdown('<div style="height:.7rem"></div>', unsafe_allow_html=True)
+        cols = st.columns(len(ins))
+        for col, d in zip(cols, ins):
+            col.markdown(kartu_insight(d), unsafe_allow_html=True)
 
-    st.markdown("")
+    st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
-    # ---------------- Tabs ----------------
     t1, t2, t3, t4, t5 = st.tabs(
-        ["📊 Ringkasan", "🏅 Leaderboard", "📈 Tren Harian", "🏢 Breakdown", "📋 Detail & Tindak Lanjut"]
-    )
+        ["Ringkasan", "Leaderboard", "Tren & Pola", "Breakdown", "Tindak Lanjut"])
 
-    # --- Ringkasan ---
+    # ---------------- ringkasan ----------------
     with t1:
-        a, b = st.columns([1, 1.35])
-        with a:
-            sec("Status Pencapaian", f"Ambang On Track: {ratio * 100:.0f}% dari target bulanan")
-            st.plotly_chart(chart_status_donut(rekap), width="stretch")
-        with b:
-            sec("Progres per Divisi", "Jumlah karyawan menurut status pencapaian")
-            st.plotly_chart(chart_status_divisi(rekap), width="stretch")
+        podium = rekap[rekap["Aktual KM"] > 0].nlargest(3, "Aktual KM")
+        if len(podium) >= 3:
+            judul("Podium Periode Ini")
+            pc = st.columns(3)
+            for col, (medali, warna), (_, row) in zip(
+                    pc, [("🥇", "#EAB308"), ("🥈", "#94A3B8"), ("🥉", "#D97706")],
+                    podium.iterrows()):
+                col.markdown(kartu_podium(
+                    medali, row["Nama"], row["Aktual KM"],
+                    f"{row['Pencapaian %']:.0f}% target · {int(row['Total Aktivitas'])} aktivitas",
+                    warna), unsafe_allow_html=True)
+            st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
-        belum = rekap[rekap["Status"] == "Belum Mulai"]
-        tertinggal = rekap[rekap["Status"] == "Tertinggal"]
-        if len(belum) or len(tertinggal):
+        a, b = st.columns([1, 1.4])
+        with a:
+            judul("Status Pencapaian", f"On Track = minimal {ratio * 100:.0f}% target")
+            st.plotly_chart(g_donat_status(rekap), width="stretch")
+        with b:
+            judul("Status per Divisi", "Komposisi karyawan di tiap divisi")
+            st.plotly_chart(g_status_divisi(rekap), width="stretch")
+
+        belum = int((rekap["Status"] == "Belum Mulai").sum())
+        tert = int((rekap["Status"] == "Tertinggal").sum())
+        if belum or tert:
             st.markdown(
-                f'<div class="note warn"><b>Perlu tindak lanjut HR.</b> '
-                f'{len(belum)} karyawan belum submit sama sekali dan {len(tertinggal)} '
-                f'karyawan tertinggal dari pace ideal. Sisa {total_hari - berjalan} hari '
-                f'di periode ini. Daftar lengkapnya ada di tab '
-                f'<i>Detail &amp; Tindak Lanjut</i>.</div>',
-                unsafe_allow_html=True,
-            )
+                f'<div class="note warn"><b>Perlu tindak lanjut.</b> {belum} karyawan '
+                f'belum submit sama sekali dan {tert} tertinggal dari pace ideal. '
+                f'Sisa {sisa_hari} hari di periode ini — daftar lengkap ada di tab '
+                f'<b>Tindak Lanjut</b>.</div>', unsafe_allow_html=True)
         else:
             st.markdown(
                 '<div class="note ok"><b>Semua karyawan on track atau sudah mencapai '
                 'target.</b> Tidak ada yang perlu di-follow-up periode ini.</div>',
-                unsafe_allow_html=True,
-            )
+                unsafe_allow_html=True)
 
         a, b = st.columns(2)
         with a:
-            sec("Partisipasi per Entitas")
-            st.plotly_chart(chart_entitas(rekap), width="stretch")
+            judul("Sebaran Pencapaian", "Berapa banyak peserta di tiap rentang target")
+            f = g_sebaran(rekap)
+            st.plotly_chart(f, width="stretch") if f else st.info("Belum ada aktivitas.")
         with b:
-            sec("Kontribusi per Jenis Aktivitas")
-            f = chart_jenis(rekap)
-            if f:
-                st.plotly_chart(f, width="stretch")
-            else:
-                st.info("Belum ada aktivitas tercatat pada periode ini.")
+            judul("Kontribusi per Jenis Aktivitas")
+            f = g_jenis(rekap)
+            st.plotly_chart(f, width="stretch") if f else st.info("Belum ada aktivitas.")
 
-    # --- Leaderboard ---
+    # ---------------- leaderboard ----------------
     with t2:
-        sec("Peringkat Peserta", f"Top {top_n} berdasarkan total jarak tempuh · "
-                                 "warna batang = persentase pencapaian target")
-        f = chart_leaderboard(rekap, top_n)
-        if f:
-            st.plotly_chart(f, width="stretch")
-        else:
-            st.info("Belum ada peserta yang submit pada periode ini.")
+        judul("Peringkat Peserta",
+              f"Top {top_n} berdasarkan jarak · warna batang = persentase target")
+        f = g_leaderboard(rekap, top_n)
+        st.plotly_chart(f, width="stretch") if f else st.info(
+            "Belum ada peserta yang submit pada periode ini.")
 
-        st.markdown("")
-        sec("Papan Peringkat Lengkap")
+        cari = st.text_input("Cari nama", placeholder="Ketik nama karyawan…",
+                             label_visibility="collapsed")
         board = rekap[rekap["Aktual KM"] > 0].copy()
         board.insert(0, "#", range(1, len(board) + 1))
+        if cari.strip():
+            board = board[board["Nama"].str.contains(cari.strip(), case=False, na=False)]
         st.dataframe(
             board[["#", "Nama", "Entitas", "Divisi", "Jenis", "Aktual KM", "Target KM",
                    "Pencapaian %", "Total Aktivitas", "Hari Aktif", "Aktivitas Terjauh",
@@ -977,74 +1215,80 @@ def main():
                 "Target KM": st.column_config.NumberColumn(format="%.0f km"),
                 "Aktivitas Terjauh": st.column_config.NumberColumn(format="%.2f km"),
                 "Pencapaian %": st.column_config.ProgressColumn(
-                    "Pencapaian", format="%.0f%%", min_value=0, max_value=100),
-            },
-        )
+                    "Pencapaian", format="%.0f%%", min_value=0, max_value=100)})
 
-    # --- Tren ---
+    # ---------------- tren ----------------
     with t3:
-        pace_harian = (rekap["Target KM"].sum() / total_hari) if total_hari else None
-        sec("Tren Aktivitas Harian",
-            "Batang = jarak per hari · garis = akumulasi bulan berjalan")
+        judul("Tren Aktivitas Harian",
+              "Batang = jarak per hari · area = akumulasi periode berjalan")
         if resp.empty:
             st.info("Belum ada aktivitas tercatat pada periode ini.")
         else:
-            st.plotly_chart(chart_tren(resp, start, end, pace_harian),
-                            width="stretch")
+            st.plotly_chart(
+                g_tren(resp, start, end, r["total_target"] / total_hari if total_hari else None),
+                width="stretch")
 
-            a, b, cc = st.columns(3)
-            daily_km = resp.groupby("Tanggal")[COL_KM].sum()
-            hari_ada = int(daily_km.size)
-            a.metric("Hari dengan aktivitas", f"{hari_ada} / {berjalan}",
-                     help="Jumlah hari yang punya minimal satu submission")
-            b.metric("Hari terproduktif",
-                     f"{daily_km.idxmax():%d %b}" if hari_ada else "-",
-                     f"{daily_km.max():.1f} km" if hari_ada else None)
-            c_avg = daily_km.sum() / berjalan if berjalan else 0
-            cc.metric("Rata-rata per hari kalender", f"{c_avg:.1f} km")
+            harian = resp.groupby("Tanggal")[COL_KM].sum()
+            m = st.columns(4)
+            m[0].metric("Hari dengan aktivitas", f"{harian.size} / {berjalan}")
+            m[1].metric("Hari terproduktif", f"{harian.idxmax():%d %b}",
+                        f"{harian.max():.1f} km")
+            m[2].metric("Rata-rata per hari kalender",
+                        f"{harian.sum() / berjalan:.1f} km" if berjalan else "-")
+            m[3].metric("Rata-rata per aktivitas", f"{resp[COL_KM].mean():.2f} km")
 
-            st.markdown("")
-            sec("Konsistensi Peserta",
-                f"Distribusi jarak harian · top {min(20, resp['Nama'].nunique())} peserta")
-            f = chart_heatmap(resp, start, end)
+            st.markdown('<div style="height:.6rem"></div>', unsafe_allow_html=True)
+            a, b = st.columns(2)
+            with a:
+                judul("Pola Hari dalam Seminggu", "Kapan karyawan paling banyak bergerak")
+                f = g_hari(resp)
+                if f:
+                    st.plotly_chart(f, width="stretch")
+            with b:
+                judul("Jam Submit", "Distribusi waktu pengisian form")
+                f = g_jam(resp)
+                st.plotly_chart(f, width="stretch") if f else st.info(
+                    "Kolom Timestamp tidak tersedia.")
+
+            judul("Konsistensi Peserta",
+                  f"Jarak harian · top {min(20, resp['Nama'].nunique())} peserta")
+            f = g_heatmap(resp, start, end)
             if f:
                 st.plotly_chart(f, width="stretch")
 
-    # --- Breakdown ---
+    # ---------------- breakdown ----------------
     with t4:
         a, b = st.columns(2)
         with a:
-            sec("Total Jarak per Divisi")
-            st.plotly_chart(chart_divisi(rekap), width="stretch")
+            judul("Total Jarak per Divisi")
+            st.plotly_chart(g_divisi(rekap), width="stretch")
         with b:
-            sec("Ringkasan Divisi", "Partisipasi dan pencapaian rata-rata")
-            g = (rekap.groupby("Divisi", observed=False)
-                 .agg(Karyawan=("Peserta", "size"),
-                      Aktif=("Aktual KM", lambda s: int((s > 0).sum())),
-                      **{"Total KM": ("Aktual KM", "sum"),
-                         "Rata2 Pencapaian %": ("Pencapaian %", "mean")})
-                 .reset_index())
-            g["Partisipasi %"] = g["Aktif"] / g["Karyawan"] * 100
-            st.dataframe(
-                g.sort_values("Total KM", ascending=False),
-                hide_index=True, width="stretch",
-                column_config={
-                    "Total KM": st.column_config.NumberColumn(format="%.1f km"),
-                    "Partisipasi %": st.column_config.ProgressColumn(
-                        format="%.0f%%", min_value=0, max_value=100),
-                    "Rata2 Pencapaian %": st.column_config.NumberColumn(format="%.0f%%"),
-                },
-            )
+            judul("Partisipasi per Entitas")
+            st.plotly_chart(g_entitas(rekap), width="stretch")
 
-        st.markdown("")
-        sec("Perbandingan Entitas")
+        judul("Ringkasan Divisi")
+        g = (rekap.groupby("Divisi", observed=False)
+             .agg(Karyawan=("Peserta", "size"),
+                  Aktif=("Aktual KM", lambda s: int((s > 0).sum())),
+                  Tercapai=("Status", lambda s: int((s == "Tercapai").sum())),
+                  **{"Total KM": ("Aktual KM", "sum"),
+                     "Rata2 Pencapaian %": ("Pencapaian %", "mean")}).reset_index())
+        g["Partisipasi %"] = g["Aktif"] / g["Karyawan"] * 100
+        st.dataframe(
+            g.sort_values("Total KM", ascending=False), hide_index=True, width="stretch",
+            column_config={
+                "Total KM": st.column_config.NumberColumn(format="%.1f km"),
+                "Rata2 Pencapaian %": st.column_config.NumberColumn(format="%.0f%%"),
+                "Partisipasi %": st.column_config.ProgressColumn(
+                    format="%.0f%%", min_value=0, max_value=100)})
+
+        judul("Perbandingan Entitas")
         g2 = (rekap.groupby("Entitas", observed=False)
               .agg(Karyawan=("Peserta", "size"),
                    Aktif=("Aktual KM", lambda s: int((s > 0).sum())),
                    Tercapai=("Status", lambda s: int((s == "Tercapai").sum())),
                    **{"Total KM": ("Aktual KM", "sum"),
-                      "Total Aktivitas": ("Total Aktivitas", "sum")})
-              .reset_index())
+                      "Total Aktivitas": ("Total Aktivitas", "sum")}).reset_index())
         g2["Partisipasi %"] = g2["Aktif"] / g2["Karyawan"] * 100
         g2["KM per Karyawan"] = g2["Total KM"] / g2["Karyawan"]
         st.dataframe(
@@ -1053,41 +1297,35 @@ def main():
                 "Total KM": st.column_config.NumberColumn(format="%.1f km"),
                 "KM per Karyawan": st.column_config.NumberColumn(format="%.2f km"),
                 "Partisipasi %": st.column_config.ProgressColumn(
-                    format="%.0f%%", min_value=0, max_value=100),
-            },
-        )
+                    format="%.0f%%", min_value=0, max_value=100)})
 
-    # --- Detail & tindak lanjut ---
+    # ---------------- tindak lanjut ----------------
     with t5:
-        sec("Daftar Tindak Lanjut", "Karyawan yang perlu diingatkan sebelum periode berakhir")
+        judul("Daftar Tindak Lanjut",
+              "Karyawan yang perlu diingatkan sebelum periode berakhir")
         fu = rekap[rekap["Status"].isin(["Belum Mulai", "Tertinggal"])].copy()
         fu = fu.sort_values(["Status", "Sisa KM"], ascending=[True, False])
         if fu.empty:
             st.success("Tidak ada karyawan yang perlu di-follow-up. 🎉")
         else:
-            sisa_hari = max(total_hari - berjalan, 1)
-            fu["KM/hari agar tercapai"] = fu["Sisa KM"] / sisa_hari
+            fu["KM/hari agar tercapai"] = fu["Sisa KM"] / max(sisa_hari, 1)
             st.dataframe(
                 fu[["Nama", "Entitas", "Jabatan", "Divisi", "Status", "Aktual KM",
-                    "Target KM", "Sisa KM", "KM/hari agar tercapai", "Aktivitas Terakhir"]],
+                    "Target KM", "Sisa KM", "KM/hari agar tercapai",
+                    "Aktivitas Terakhir"]],
                 hide_index=True, width="stretch",
                 column_config={
                     "Aktual KM": st.column_config.NumberColumn(format="%.2f km"),
                     "Target KM": st.column_config.NumberColumn(format="%.0f km"),
                     "Sisa KM": st.column_config.NumberColumn(format="%.2f km"),
                     "KM/hari agar tercapai": st.column_config.NumberColumn(format="%.2f km"),
-                    "Aktivitas Terakhir": st.column_config.DateColumn(format="DD MMM YYYY"),
-                },
-            )
+                    "Aktivitas Terakhir": st.column_config.DateColumn(format="DD MMM YYYY")})
             st.download_button(
                 "⬇️ Unduh daftar tindak lanjut (CSV)",
                 fu.to_csv(index=False).encode("utf-8"),
-                file_name=f"follow_up_{pilih.replace(' ', '_')}.csv",
-                mime="text/csv",
-            )
+                file_name=f"follow_up_{pilih.replace(' ', '_')}.csv", mime="text/csv")
 
-        st.markdown("")
-        sec("Verifikasi Data", "Entri yang sebaiknya dicek sebelum rekap dikunci")
+        judul("Verifikasi Data", "Entri yang sebaiknya dicek sebelum rekap dikunci")
         anom = find_anomali(resp, periode)
         if anom.empty:
             st.markdown('<div class="note ok">Tidak ada anomali terdeteksi pada '
@@ -1097,8 +1335,7 @@ def main():
                          column_config={"Tanggal": st.column_config.DateColumn(
                              format="DD MMM YYYY")})
 
-        st.markdown("")
-        sec("Log Aktivitas", "Seluruh submission pada periode terpilih")
+        judul("Log Aktivitas", "Seluruh submission pada periode terpilih")
         detail = resp[["Tanggal", "Nama", "Entitas", "Divisi", "Jenis", COL_KM,
                        COL_BUKTI, COL_TS]].sort_values(COL_TS, ascending=False)
         st.dataframe(
@@ -1108,23 +1345,18 @@ def main():
                 COL_TS: st.column_config.DatetimeColumn("Waktu Submit",
                                                         format="DD MMM YYYY HH:mm"),
                 COL_KM: st.column_config.NumberColumn("Jarak", format="%.2f km"),
-                COL_BUKTI: st.column_config.LinkColumn("Bukti Strava", display_text="Buka"),
-            },
-        )
+                COL_BUKTI: st.column_config.LinkColumn("Bukti Strava",
+                                                       display_text="Buka")})
 
         d1, d2 = st.columns(2)
-        d1.download_button(
-            "⬇️ Unduh rekap per karyawan (CSV)",
-            rekap.to_csv(index=False).encode("utf-8"),
-            file_name=f"rekap_{pilih.replace(' ', '_')}.csv",
-            mime="text/csv", width="stretch",
-        )
-        d2.download_button(
-            "⬇️ Unduh log aktivitas (CSV)",
-            detail.to_csv(index=False).encode("utf-8"),
-            file_name=f"log_aktivitas_{pilih.replace(' ', '_')}.csv",
-            mime="text/csv", width="stretch",
-        )
+        d1.download_button("⬇️ Unduh rekap per karyawan (CSV)",
+                           rekap.to_csv(index=False).encode("utf-8"),
+                           file_name=f"rekap_{pilih.replace(' ', '_')}.csv",
+                           mime="text/csv", width="stretch")
+        d2.download_button("⬇️ Unduh log aktivitas (CSV)",
+                           detail.to_csv(index=False).encode("utf-8"),
+                           file_name=f"log_{pilih.replace(' ', '_')}.csv",
+                           mime="text/csv", width="stretch")
 
 
 if __name__ == "__main__":
