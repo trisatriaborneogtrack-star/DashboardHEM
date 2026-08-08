@@ -497,7 +497,20 @@ def _normalize(resp_raw: pd.DataFrame, roster_raw: pd.DataFrame | None):
 
     roster["Lokasi"] = [peta_lokasi.get(p) or map_lokasi(j)
                         for p, j in zip(roster["Peserta"], roster["Jabatan"])]
+
+    # Tab jawaban bisa punya kolom Lokasi sendiri (mis. hasil XLOOKUP ke sheet
+    # master). Kalau dibiarkan, merge menghasilkan Lokasi_x/Lokasi_y dan kolom
+    # 'Lokasi' lenyap. Nilai dari tab jawaban dipakai sebagai cadangan, lalu
+    # kolom aslinya dibuang sebelum merge.
+    cadangan_lokasi = None
+    kolom_bentrok = [c for c in df.columns if c in KOLOM_LOKASI]
+    if kolom_bentrok:
+        cadangan_lokasi = df[kolom_bentrok[0]].map(baca_lokasi)
+        df = df.drop(columns=kolom_bentrok)
+
     df = df.merge(roster[["Peserta", "Lokasi"]], on="Peserta", how="left")
+    if cadangan_lokasi is not None:
+        df["Lokasi"] = df["Lokasi"].fillna(cadangan_lokasi.reindex(df.index))
     df["Lokasi"] = df["Lokasi"].fillna("HO")
     # n_master = 0 berarti tab master tidak terbaca; jumlah karyawan lalu hanya
     # sebanyak orang yang pernah submit, dan angka partisipasi jadi menyesatkan
@@ -1234,10 +1247,15 @@ def main():
     except Exception as e:  # noqa: BLE001
         st.markdown(f'<div class="hero"><h1>{APP_TITLE}</h1><p>{APP_SUB}</p></div>',
                     unsafe_allow_html=True)
-        pesan = str(e)
-        st.error(f"Gagal memuat Google Sheet: {pesan}", icon="⚠️")
+        pesan = f"{type(e).__name__}: {e}"
+        st.error(f"Gagal memuat Google Sheet — {pesan}", icon="⚠️")
 
-        if "PEM" in pesan or "private_key" in pesan or "InvalidData" in pesan:
+        if "KeyError" in pesan:
+            st.info(
+                "Sepertinya ada bentrokan atau ketidaksesuaian nama kolom antara "
+                "tab jawaban dan tab master. Pastikan nama kolom di kedua tab tidak "
+                "berubah, lalu tekan **Muat ulang data**.", icon="🔧")
+        elif "PEM" in pesan or "private_key" in pesan or "InvalidData" in pesan:
             st.info(
                 "**Masalahnya ada di `private_key`.** Buka file JSON service account, "
                 "salin nilai `private_key` seutuhnya, lalu di **App settings → "
